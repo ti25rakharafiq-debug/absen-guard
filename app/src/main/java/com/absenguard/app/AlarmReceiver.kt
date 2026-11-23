@@ -45,6 +45,16 @@ class AlarmReceiver : BroadcastReceiver() {
                 db.getScheduleById(scheduleId) ?: return
             }
 
+            if (schedule.id > 0 && !isPreReminder && db.isSkippedToday(schedule.id)) {
+                AlarmScheduler.scheduleAll(context)
+                NextClassWidgetProvider.updateAllWidgets(context)
+                return
+            }
+
+            if (schedule.id > 0 && !isPreReminder) {
+                db.recordAttendance(schedule.id, schedule.courseName, "TERLEWAT")
+            }
+
             val notifEnabled = (db.getSetting("global_notif", "1") == "1") && schedule.notifEnabled
             val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             ensureChannel(notifManager)

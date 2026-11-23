@@ -68,6 +68,19 @@ class NextClassWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             views.setOnClickPendingIntent(R.id.widget_root, pi)
+            if (next != null) {
+                val attendIntent = Intent(context, NotificationActionReceiver::class.java).apply {
+                    action = NotificationActionReceiver.ACTION_MARK_ATTENDED
+                    putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, next.first.id)
+                }
+                val attendPi = PendingIntent.getBroadcast(
+                    context,
+                    widgetId + 30000,
+                    attendIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                views.setOnClickPendingIntent(R.id.widget_btn_attend, attendPi)
+            }
             appWidgetManager.updateAppWidget(widgetId, views)
         }
     }

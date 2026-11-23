@@ -19,6 +19,9 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.text.InputType
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.view.animation.OvershootInterpolator
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -121,8 +124,13 @@ class AlarmAlertActivity : AppCompatActivity() {
 
         if (shouldRing) {
             try {
-                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                val customUri = db.getSetting("custom_ringtone_uri", "")
+                val uri = if (customUri.isNotEmpty()) {
+                    Uri.parse(customUri)
+                } else {
+                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                        ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                }
                 val ringtone = RingtoneManager.getRingtone(this, uri)
                 ringtone.audioAttributes = AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ALARM)
@@ -134,6 +142,22 @@ class AlarmAlertActivity : AppCompatActivity() {
                 activeRingtone = ringtone
                 ringtone.play()
             } catch (_: Exception) {
+                try {
+                    val ringtone = RingtoneManager.getRingtone(
+                        this,
+                        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    )
+                    ringtone.audioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        ringtone.isLooping = true
+                    }
+                    activeRingtone = ringtone
+                    ringtone.play()
+                } catch (_: Exception) {
+                }
             }
         }
 
@@ -184,6 +208,18 @@ class AlarmAlertActivity : AppCompatActivity() {
                 cornerRadius = dp(16).toFloat()
             }
         }
+        val badgePulse = ObjectAnimator.ofFloat(badge, "scaleX", 1f, 1.04f).apply {
+            duration = 900L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+        }
+        val badgePulseY = ObjectAnimator.ofFloat(badge, "scaleY", 1f, 1.04f).apply {
+            duration = 900L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+        }
+        badgePulse.start()
+        badgePulseY.start()
 
         clockView = TextView(this).apply {
             text = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -260,20 +296,14 @@ class AlarmAlertActivity : AppCompatActivity() {
             card.addView(edit, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
-        val btnPortal = makeActionButton("Buka Portal Absen (BOC)", "#5B6AD0") {
+        val btnPortal = makeActionButton("Buka Portal Absen (SIPT2)", "#5B6AD0") {
             if (!validateMath()) return@makeActionButton
             stopActiveAlarm()
             cancelNotif(schedule.id)
-            if (schedule.id > 0) {
-                db.recordAttendance(schedule.id, schedule.courseName, "HADIR")
-                NextClassWidgetProvider.updateAllWidgets(this)
+            val portalIntent = Intent(this, SiptPortalActivity::class.java).apply {
+                putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, schedule.id)
             }
-            val url = db.getSetting("portal_url", "https://boc.ubpkarawang.ac.id")
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            } catch (_: Exception) {
-                Toast.makeText(this, "Browser tidak ditemukan", Toast.LENGTH_SHORT).show()
-            }
+            startActivity(portalIntent)
             finish()
         }
 

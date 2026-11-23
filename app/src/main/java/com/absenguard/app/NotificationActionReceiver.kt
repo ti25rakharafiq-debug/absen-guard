@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 
 class NotificationActionReceiver : BroadcastReceiver() {
 
@@ -31,6 +32,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
                         db.recordAttendance(scheduleId, schedule.courseName, "HADIR")
                     }
                 }
+                Toast.makeText(context, "Absen tercatat hadir!", Toast.LENGTH_SHORT).show()
                 NextClassWidgetProvider.updateAllWidgets(context)
             }
             ACTION_SNOOZE -> {
