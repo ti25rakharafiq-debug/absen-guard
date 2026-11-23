@@ -240,139 +240,6 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         if (status == "TERLEWAT" && existingStatus == "HADIR") {
             return
         }
-
-        fun getAllAttendanceLogs(): List<AttendanceLog> {
-            val list = mutableListOf<AttendanceLog>()
-            val cursor = readableDatabase.rawQuery(
-                "SELECT id, schedule_id, course_name, date_str, status, timestamp FROM attendance_logs ORDER BY timestamp DESC",
-                null
-            )
-            cursor.use {
-                while (it.moveToNext()) {
-                    list.add(
-                        AttendanceLog(
-                            it.getLong(0),
-                            it.getLong(1),
-                            it.getString(2),
-                            it.getString(3),
-                            it.getString(4),
-                            it.getLong(5)
-                        )
-                    )
-                }
-            }
-            return list
-        }
-
-        fun isSkippedToday(scheduleId: Long): Boolean {
-            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-            return getSetting("skip_${scheduleId}_${today}", "0") == "1"
-        }
-
-        fun setSkipToday(scheduleId: Long, skip: Boolean) {
-            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-            setSetting("skip_${scheduleId}_${today}", if (skip) "1" else "0")
-        }
-
-        fun exportBackupJson(): String {
-            val root = JSONObject()
-            val schedules = JSONArray()
-            for (schedule in getAllSchedules()) {
-                schedules.put(JSONObject().apply {
-                    put("day_of_week", schedule.dayOfWeek)
-                    put("start_hour", schedule.startHour)
-                    put("start_minute", schedule.startMinute)
-                    put("end_hour", schedule.endHour)
-                    put("end_minute", schedule.endMinute)
-                    put("course_name", schedule.courseName)
-                    put("room", schedule.room)
-                    put("class_mode", schedule.classMode)
-                    put("ring_enabled", if (schedule.ringEnabled) 1 else 0)
-                    put("vibrate_enabled", if (schedule.vibrateEnabled) 1 else 0)
-                    put("notif_enabled", if (schedule.notifEnabled) 1 else 0)
-                    put("active", if (schedule.active) 1 else 0)
-                })
-            }
-            root.put("schedules", schedules)
-            val logs = JSONArray()
-            for (log in getAllAttendanceLogs()) {
-                logs.put(JSONObject().apply {
-                    put("schedule_id", log.scheduleId)
-                    put("course_name", log.courseName)
-                    put("date_str", log.dateStr)
-                    put("status", log.status)
-                    put("timestamp", log.timestamp)
-                })
-            }
-            root.put("attendance_logs", logs)
-            val settings = JSONObject()
-            val cursor = readableDatabase.rawQuery("SELECT key, value FROM app_settings", null)
-            cursor.use {
-                while (it.moveToNext()) {
-                    settings.put(it.getString(0), it.getString(1))
-                }
-            }
-            root.put("app_settings", settings)
-            return root.toString(2)
-        }
-
-        fun importBackupJson(jsonStr: String): Boolean {
-            return try {
-                val root = JSONObject(jsonStr)
-                val db = writableDatabase
-                db.beginTransaction()
-                try {
-                    db.delete("schedules", null, null)
-                    db.delete("attendance_logs", null, null)
-                    db.delete("app_settings", null, null)
-                    val schedules = root.optJSONArray("schedules") ?: JSONArray()
-                    for (i in 0 until schedules.length()) {
-                        val item = schedules.getJSONObject(i)
-                        val cv = ContentValues().apply {
-                            put("day_of_week", item.getInt("day_of_week"))
-                            put("start_hour", item.getInt("start_hour"))
-                            put("start_minute", item.getInt("start_minute"))
-                            put("end_hour", item.getInt("end_hour"))
-                            put("end_minute", item.getInt("end_minute"))
-                            put("course_name", item.getString("course_name"))
-                            put("room", item.getString("room"))
-                            put("class_mode", item.getString("class_mode"))
-                            put("ring_enabled", item.optInt("ring_enabled", 1))
-                            put("vibrate_enabled", item.optInt("vibrate_enabled", 1))
-                            put("notif_enabled", item.optInt("notif_enabled", 1))
-                            put("active", item.optInt("active", 1))
-                        }
-                        db.insert("schedules", null, cv)
-                    }
-                    val logs = root.optJSONArray("attendance_logs") ?: JSONArray()
-                    for (i in 0 until logs.length()) {
-                        val item = logs.getJSONObject(i)
-                        val cv = ContentValues().apply {
-                            put("schedule_id", item.getLong("schedule_id"))
-                            put("course_name", item.getString("course_name"))
-                            put("date_str", item.getString("date_str"))
-                            put("status", item.getString("status"))
-                            put("timestamp", item.getLong("timestamp"))
-                        }
-                        db.insert("attendance_logs", null, cv)
-                    }
-                    val settings = root.optJSONObject("app_settings") ?: JSONObject()
-                    settings.keys().forEach { key ->
-                        val cv = ContentValues().apply {
-                            put("key", key)
-                            put("value", settings.getString(key))
-                        }
-                        db.insert("app_settings", null, cv)
-                    }
-                    db.setTransactionSuccessful()
-                    true
-                } finally {
-                    db.endTransaction()
-                }
-            } catch (_: Exception) {
-                false
-            }
-        }
         val cv = ContentValues().apply {
             put("schedule_id", scheduleId)
             put("course_name", courseName)
@@ -384,6 +251,139 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             db.update("attendance_logs", cv, "id = ?", arrayOf(existingId.toString()))
         } else {
             db.insert("attendance_logs", null, cv)
+        }
+    }
+
+    fun getAllAttendanceLogs(): List<AttendanceLog> {
+        val list = mutableListOf<AttendanceLog>()
+        val cursor = readableDatabase.rawQuery(
+            "SELECT id, schedule_id, course_name, date_str, status, timestamp FROM attendance_logs ORDER BY timestamp DESC",
+            null
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    AttendanceLog(
+                        it.getLong(0),
+                        it.getLong(1),
+                        it.getString(2),
+                        it.getString(3),
+                        it.getString(4),
+                        it.getLong(5)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun isSkippedToday(scheduleId: Long): Boolean {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        return getSetting("skip_${scheduleId}_${today}", "0") == "1"
+    }
+
+    fun setSkipToday(scheduleId: Long, skip: Boolean) {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        setSetting("skip_${scheduleId}_${today}", if (skip) "1" else "0")
+    }
+
+    fun exportBackupJson(): String {
+        val root = JSONObject()
+        val schedules = JSONArray()
+        for (schedule in getAllSchedules()) {
+            schedules.put(JSONObject().apply {
+                put("day_of_week", schedule.dayOfWeek)
+                put("start_hour", schedule.startHour)
+                put("start_minute", schedule.startMinute)
+                put("end_hour", schedule.endHour)
+                put("end_minute", schedule.endMinute)
+                put("course_name", schedule.courseName)
+                put("room", schedule.room)
+                put("class_mode", schedule.classMode)
+                put("ring_enabled", if (schedule.ringEnabled) 1 else 0)
+                put("vibrate_enabled", if (schedule.vibrateEnabled) 1 else 0)
+                put("notif_enabled", if (schedule.notifEnabled) 1 else 0)
+                put("active", if (schedule.active) 1 else 0)
+            })
+        }
+        root.put("schedules", schedules)
+        val logs = JSONArray()
+        for (log in getAllAttendanceLogs()) {
+            logs.put(JSONObject().apply {
+                put("schedule_id", log.scheduleId)
+                put("course_name", log.courseName)
+                put("date_str", log.dateStr)
+                put("status", log.status)
+                put("timestamp", log.timestamp)
+            })
+        }
+        root.put("attendance_logs", logs)
+        val settings = JSONObject()
+        val cursor = readableDatabase.rawQuery("SELECT key, value FROM app_settings", null)
+        cursor.use {
+            while (it.moveToNext()) {
+                settings.put(it.getString(0), it.getString(1))
+            }
+        }
+        root.put("app_settings", settings)
+        return root.toString(2)
+    }
+
+    fun importBackupJson(jsonStr: String): Boolean {
+        return try {
+            val root = JSONObject(jsonStr)
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                db.delete("schedules", null, null)
+                db.delete("attendance_logs", null, null)
+                db.delete("app_settings", null, null)
+                val schedules = root.optJSONArray("schedules") ?: JSONArray()
+                for (i in 0 until schedules.length()) {
+                    val item = schedules.getJSONObject(i)
+                    val cv = ContentValues().apply {
+                        put("day_of_week", item.getInt("day_of_week"))
+                        put("start_hour", item.getInt("start_hour"))
+                        put("start_minute", item.getInt("start_minute"))
+                        put("end_hour", item.getInt("end_hour"))
+                        put("end_minute", item.getInt("end_minute"))
+                        put("course_name", item.getString("course_name"))
+                        put("room", item.getString("room"))
+                        put("class_mode", item.getString("class_mode"))
+                        put("ring_enabled", item.optInt("ring_enabled", 1))
+                        put("vibrate_enabled", item.optInt("vibrate_enabled", 1))
+                        put("notif_enabled", item.optInt("notif_enabled", 1))
+                        put("active", item.optInt("active", 1))
+                    }
+                    db.insert("schedules", null, cv)
+                }
+                val logs = root.optJSONArray("attendance_logs") ?: JSONArray()
+                for (i in 0 until logs.length()) {
+                    val item = logs.getJSONObject(i)
+                    val cv = ContentValues().apply {
+                        put("schedule_id", item.getLong("schedule_id"))
+                        put("course_name", item.getString("course_name"))
+                        put("date_str", item.getString("date_str"))
+                        put("status", item.getString("status"))
+                        put("timestamp", item.getLong("timestamp"))
+                    }
+                    db.insert("attendance_logs", null, cv)
+                }
+                val settings = root.optJSONObject("app_settings") ?: JSONObject()
+                settings.keys().forEach { key ->
+                    val cv = ContentValues().apply {
+                        put("key", key)
+                        put("value", settings.getString(key))
+                    }
+                    db.insert("app_settings", null, cv)
+                }
+                db.setTransactionSuccessful()
+                true
+            } finally {
+                db.endTransaction()
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
