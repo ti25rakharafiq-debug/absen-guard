@@ -58,9 +58,12 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var db: ScheduleDbHelper
+    private lateinit var vaultController: KuliahVaultController
     private lateinit var auroraView: AuroraMeshView
     private lateinit var rootContainer: FrameLayout
     private lateinit var mainContent: LinearLayout
+    private lateinit var vaultContentContainer: LinearLayout
+    private lateinit var fabAddSchedule: Button
     private lateinit var permissionCard: LinearLayout
     private lateinit var nextClassCard: FrameLayout
     private lateinit var nextClassTitle: TextView
@@ -72,6 +75,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var filterRow: LinearLayout
     private lateinit var scheduleListContainer: LinearLayout
     private val dayChips = mutableMapOf<Int, TextView>()
+    private val bottomNavButtons = mutableMapOf<Int, TextView>()
+    private var activeMainTab = 0 // 0=Jadwal, 1=PDF, 2=Rekam, 3=Papan, 4=Belajar
     private var selectedDayFilter = 0
     private var currentNextSchedule: CourseSchedule? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -92,6 +97,29 @@ class MainActivity : AppCompatActivity() {
     private val restorePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { restoreBackup(it) }
     }
+    private val pdfPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vaultController.handlePickedPdfUri(it) }
+    }
+    private val boardCameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        if (success) vaultController.handleCapturedBoardPhoto()
+    }
+    private val boardGalleryLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { vaultController.handlePickedBoardImage(it) }
+    }
+    private val audioPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            Toast.makeText(this, "Izin mikrofon aktif, tekan tombol rekam lagi", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Izin mikrofon diperlukan untuk merekam dosen", Toast.LENGTH_LONG).show()
+        }
+    }
+    private val cameraPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            Toast.makeText(this, "Izin kamera aktif, tekan tombol Kamera lagi", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Izin kamera diperlukan untuk memotret papan tulis", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private val countdownRunnable = object : Runnable {
         override fun run() {
@@ -103,6 +131,17 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         db = ScheduleDbHelper(this)
+        vaultController = KuliahVaultController(
+            activity = this,
+            db = db,
+            isDarkProvider = { isDarkMode() },
+            onRequestPickPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
+            onRequestCapturePhoto = { uri -> boardCameraLauncher.launch(uri) },
+            onRequestPickGallery = { boardGalleryLauncher.launch("image/*") },
+            onRequestAudioPermission = { audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            onRequestCameraPermission = { cameraPermLauncher.launch(Manifest.permission.CAMERA) }
+        )
+        vaultController.syncDefaultCourseFromSchedule()
         applySystemBars()
 
         rootContainer = FrameLayout(this)
@@ -119,10 +158,17 @@ class MainActivity : AppCompatActivity() {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_ALWAYS
         }
-        mainContent = LinearLayout(this).apply {
+        val pageWrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(96))
+            setPadding(dp(16), dp(14), dp(16), dp(136))
         }
+
+        mainContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        vaultContentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
         buildHeader()
         buildPermissionCard()
         buildNextClassCard()
@@ -130,21 +176,24 @@ class MainActivity : AppCompatActivity() {
         buildFilterChips()
         scheduleListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         mainContent.addView(scheduleListContainer)
-        scrollView.addView(mainContent)
+
+        pageWrapper.addView(mainContent)
+        pageWrapper.addView(vaultContentContainer)
+        scrollView.addView(pageWrapper)
         rootContainer.addView(scrollView)
 
-        val fab = Button(this).apply {
+        fabAddSchedule = Button(this).apply {
             text = "+ Tambah Jadwal"
             isAllCaps = false
-            textSize = 14f
+            textSize = 13f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteLightText())
-            setPadding(dp(22), dp(13), dp(22), dp(13))
+            setPadding(dp(20), dp(11), dp(20), dp(11))
             background = LiquidGlassKit.pillGlassSurface(
                 this@MainActivity,
                 "#E64338CA",
                 "#A6F8FAFC",
-                28f
+                26f
             )
             LiquidGlassKit.applyGlassElevation(this, 10f, isDarkMode())
             setOnClickListener { showScheduleEditorDialog(null) }
@@ -155,9 +204,12 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.END
-            setMargins(dp(16), dp(16), dp(16), dp(22))
+            setMargins(dp(16), dp(16), dp(16), dp(78))
         }
-        rootContainer.addView(fab, fabParams)
+        rootContainer.addView(fabAddSchedule, fabParams)
+
+        buildBottomGlassDock()
+
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
             val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             view.setPadding(sys.left, sys.top, sys.right, sys.bottom)
@@ -169,10 +221,87 @@ class MainActivity : AppCompatActivity() {
         handler.post(countdownRunnable)
     }
 
+    private fun buildBottomGlassDock() {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 28f, strongRim = true)
+            LiquidGlassKit.applyGlassElevation(this, 12f, isDarkMode())
+        }
+        val tabs = listOf(
+            0 to "Jadwal",
+            1 to "PDF",
+            2 to "Rekam",
+            3 to "Papan",
+            4 to "Belajar"
+        )
+        bottomNavButtons.clear()
+        for ((idx, label) in tabs) {
+            val btn = TextView(this).apply {
+                text = label
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setOnClickListener { switchMainTab(idx) }
+                LiquidGlassKit.attachLiquidTouch(this, 0.94f)
+            }
+            bottomNavButtons[idx] = btn
+            dock.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            })
+        }
+        val dockParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(14), dp(8), dp(14), dp(14))
+        }
+        rootContainer.addView(dock, dockParams)
+        updateBottomDockStyles()
+    }
+
+    private fun switchMainTab(tabIndex: Int) {
+        activeMainTab = tabIndex
+        updateBottomDockStyles()
+        if (tabIndex == 0) {
+            mainContent.visibility = View.VISIBLE
+            vaultContentContainer.visibility = View.GONE
+            fabAddSchedule.visibility = View.VISIBLE
+            refreshAll()
+        } else {
+            mainContent.visibility = View.GONE
+            vaultContentContainer.visibility = View.VISIBLE
+            fabAddSchedule.visibility = View.GONE
+            vaultController.syncDefaultCourseFromSchedule()
+            when (tabIndex) {
+                1 -> vaultController.renderPdfTab(vaultContentContainer)
+                2 -> vaultController.renderRecordTab(vaultContentContainer)
+                3 -> vaultController.renderBoardTab(vaultContentContainer)
+                4 -> vaultController.renderStudyTab(vaultContentContainer)
+            }
+        }
+    }
+
+    private fun updateBottomDockStyles() {
+        for ((idx, btn) in bottomNavButtons) {
+            val active = idx == activeMainTab
+            btn.setTextColor(if (active) paletteLightText() else paletteText())
+            btn.background = if (active) {
+                LiquidGlassKit.pillGlassSurface(this, "#4F46E5", "#CCF8FAFC", 22f)
+            } else {
+                null
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         auroraView.startMotion()
-        refreshAll()
+        if (activeMainTab == 0) refreshAll()
     }
 
     override fun onPause() {
@@ -210,7 +339,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
         })
         titleCol.addView(TextView(this).apply {
-            text = "E-Learning & SIPT UBP • Dynamic Island"
+            text = "E-Learning & SIPT UBP • KuliahVault IE"
             textSize = 12f
             setTextColor(paletteSubtext())
         })
