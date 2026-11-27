@@ -3,6 +3,7 @@ package com.absenguard.app
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -27,13 +28,17 @@ class SiptPortalActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_COURSE_URL = "extra_course_url"
         const val EXTRA_COURSE_NAME = "extra_course_name"
+        const val EXTRA_PORTAL_MODE = "extra_portal_mode"
+        const val EXTRA_PORTAL_PASSWORD = "extra_portal_password"
     }
 
     private lateinit var webView: WebView
     private val handler = Handler(Looper.getMainLooper())
     private var targetCourseUrl = ""
+    private var portalMode = ""
+    private var passedPassword = ""
     private var wasRedirectedToLogin = false
-    private var autoLoginAttempted = false
+    private var lastAutoLoginHost = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +46,8 @@ class SiptPortalActivity : AppCompatActivity() {
         val scheduleId = intent.getLongExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, -1L)
         val passedUrl = intent.getStringExtra(EXTRA_COURSE_URL)?.trim().orEmpty()
         val passedName = intent.getStringExtra(EXTRA_COURSE_NAME)?.trim().orEmpty()
+        portalMode = intent.getStringExtra(EXTRA_PORTAL_MODE)?.trim().orEmpty()
+        passedPassword = intent.getStringExtra(EXTRA_PORTAL_PASSWORD)?.trim().orEmpty()
 
         window.statusBarColor = Color.parseColor("#0F172A")
         window.navigationBarColor = Color.parseColor("#0F172A")
@@ -83,7 +90,7 @@ class SiptPortalActivity : AppCompatActivity() {
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#F1F5F9"))
-            setPadding(dp(11), dp(6), dp(11), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#334155", "#66F8FAFC", 16f)
             setOnClickListener { finish() }
             LiquidGlassKit.attachLiquidTouch(this)
@@ -109,9 +116,9 @@ class SiptPortalActivity : AppCompatActivity() {
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#F8FAFC"))
-            setPadding(dp(11), dp(6), dp(11), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#4F46E5", "#99F8FAFC", 16f)
-            setOnClickListener { fillCredentials(false) }
+            setOnClickListener { fillCredentials(autoSubmit = false, currentUrl = webView.url ?: targetCourseUrl) }
             LiquidGlassKit.attachLiquidTouch(this)
         }
 
@@ -121,7 +128,7 @@ class SiptPortalActivity : AppCompatActivity() {
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#F8FAFC"))
-            setPadding(dp(11), dp(6), dp(11), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#2E8B57", "#99F8FAFC", 16f)
             setOnClickListener {
                 if (activeId > 0) {
@@ -153,15 +160,21 @@ class SiptPortalActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
                     CookieManager.getInstance().flush()
-                    if (url.contains("/login")) {
-                        wasRedirectedToLogin = true
-                        val shouldSubmit = !autoLoginAttempted
-                        autoLoginAttempted = true
-                        fillCredentials(shouldSubmit)
+                    val host = Uri.parse(url).host.orEmpty().lowercase()
+                    val isSiptDomain = host.contains("sipt")
+                    val isLoginLikeUrl = url.contains("/login", ignoreCase = true) || isSiptDomain
+
+                    if (isLoginLikeUrl) {
+                        if (url.contains("/login", ignoreCase = true)) {
+                            wasRedirectedToLogin = true
+                        }
+                        val shouldSubmit = lastAutoLoginHost != host
+                        lastAutoLoginHost = host
+                        fillCredentials(autoSubmit = shouldSubmit, currentUrl = url)
                     } else {
                         if (wasRedirectedToLogin &&
-                            targetCourseUrl.contains("elearning.ubpkarawang.ac.id") &&
-                            !targetCourseUrl.contains("/login") &&
+                            targetCourseUrl.contains("elearning.ubpkarawang.ac.id", ignoreCase = true) &&
+                            !targetCourseUrl.contains("/login", ignoreCase = true) &&
                             !isSameTargetUrl(url, targetCourseUrl)
                         ) {
                             wasRedirectedToLogin = false
@@ -200,15 +213,27 @@ class SiptPortalActivity : AppCompatActivity() {
         return cleanCurrent.equals(cleanTarget, ignoreCase = true)
     }
 
-    private fun fillCredentials(autoSubmit: Boolean) {
+    private fun resolvePasswordForUrl(currentUrl: String, db: ScheduleDbHelper): String {
+        val lower = currentUrl.lowercase()
+        return when {
+            lower.contains("sipt") -> "ubpk2024"
+            lower.contains("elearning") -> db.getSetting("sipt_password", "Buana0000!")
+            passedPassword.isNotEmpty() -> passedPassword
+            portalMode.equals("SIPT", ignoreCase = true) -> "ubpk2024"
+            else -> db.getSetting("sipt_password", "Buana0000!")
+        }
+    }
+
+    private fun fillCredentials(autoSubmit: Boolean, currentUrl: String) {
         val db = ScheduleDbHelper(this)
         val username = db.getSetting("sipt_username", "ti25.rakharafiq@mhs.ubpkarawang.ac.id")
             .replace("\\", "\\\\").replace("'", "\\'")
-        val password = db.getSetting("sipt_password", "Buana0000!")
+        val password = resolvePasswordForUrl(currentUrl, db)
             .replace("\\", "\\\\").replace("'", "\\'")
+
         val script = """
             (function(){
-                var user=document.querySelector('#username, input[name="username"], input[name*="email"], input[type="email"], input[type="text"]');
+                var user=document.querySelector('#username, input[name="username"], input[name="email"], input[name*="email"], input[type="email"], input[type="text"]');
                 var pass=document.querySelector('#password, input[name="password"], input[type="password"]');
                 function setField(el,value){
                     if(el){
@@ -217,21 +242,27 @@ class SiptPortalActivity : AppCompatActivity() {
                         el.dispatchEvent(new Event('change',{bubbles:true}));
                     }
                 }
-                setField(user,'$username');
-                setField(pass,'$password');
+                if(user && pass){
+                    setField(user,'$username');
+                    setField(pass,'$password');
+                    return 'FILLED';
+                }
+                return 'NO_FORM';
             })();
         """.trimIndent()
-        webView.evaluateJavascript(script, null)
-        if (autoSubmit) {
-            handler.postDelayed({
-                val submitScript = """
-                    (function(){
-                        var btn=document.querySelector('#loginbtn, button[type="submit"], input[type="submit"]');
-                        if(btn){ btn.click(); }
-                    })();
-                """.trimIndent()
-                webView.evaluateJavascript(submitScript, null)
-            }, 450L)
+
+        webView.evaluateJavascript(script) { result ->
+            if (autoSubmit && result != null && result.contains("FILLED")) {
+                handler.postDelayed({
+                    val submitScript = """
+                        (function(){
+                            var btn=document.querySelector('#loginbtn, button[type="submit"], input[type="submit"]');
+                            if(btn){ btn.click(); }
+                        })();
+                    """.trimIndent()
+                    webView.evaluateJavascript(submitScript, null)
+                }, 450L)
+            }
         }
     }
 
