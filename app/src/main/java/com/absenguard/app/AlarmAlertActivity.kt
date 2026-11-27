@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -26,10 +25,12 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -57,6 +58,7 @@ class AlarmAlertActivity : AppCompatActivity() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var auroraView: AuroraMeshView
     private lateinit var clockView: TextView
     private var expectedAnswer = 0
     private var mathRequired = false
@@ -83,6 +85,15 @@ class AlarmAlertActivity : AppCompatActivity() {
 
         val scheduleId = intent.getLongExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, -1L)
         val db = ScheduleDbHelper(this)
+        val isDark = db.getSetting("dark_mode", "0") == "1"
+
+        window.statusBarColor = Color.parseColor(if (isDark) "#080C16" else "#E8EEFF")
+        window.navigationBarColor = Color.parseColor(if (isDark) "#0B1324" else "#E6F7FA")
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !isDark
+            isAppearanceLightNavigationBars = !isDark
+        }
+
         val schedule = if (scheduleId == AlarmScheduler.TEST_SCHEDULE_ID) {
             CourseSchedule(
                 id = AlarmScheduler.TEST_SCHEDULE_ID,
@@ -178,44 +189,50 @@ class AlarmAlertActivity : AppCompatActivity() {
             }
         }
 
-        val root = LinearLayout(this).apply {
+        val rootFrame = FrameLayout(this)
+        auroraView = AuroraMeshView(this) { isDark }
+        rootFrame.addView(
+            auroraView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val centerWrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(20), dp(24), dp(20), dp(24))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F8F9FA"))
-            }
         }
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(22), dp(26), dp(22), dp(26))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#EEF1F6"))
-                cornerRadius = dp(24).toFloat()
-                setStroke(dp(1), Color.parseColor("#D5DCE6"))
-            }
+            background = LiquidGlassKit.glassSurface(this@AlarmAlertActivity, isDark, 28f)
+            LiquidGlassKit.applyGlassElevation(this, 12f, isDark)
         }
 
         val badge = TextView(this).apply {
             text = "WAKTUNYA ABSEN KULIAH"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#DC2626"))
-            setPadding(dp(14), dp(6), dp(14), dp(6))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#FEE2E2"))
-                cornerRadius = dp(16).toFloat()
-            }
+            setTextColor(Color.parseColor(if (isDark) "#FCA5A5" else "#DC2626"))
+            setPadding(dp(15), dp(7), dp(15), dp(7))
+            background = LiquidGlassKit.pillGlassSurface(
+                this@AlarmAlertActivity,
+                if (isDark) "#4D991B1B" else "#33DC2626",
+                "#80DC2626",
+                16f
+            )
         }
-        val badgePulse = ObjectAnimator.ofFloat(badge, "scaleX", 1f, 1.04f).apply {
-            duration = 900L
+        val badgePulse = ObjectAnimator.ofFloat(badge, "scaleX", 1f, 1.05f).apply {
+            duration = 850L
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
         }
-        val badgePulseY = ObjectAnimator.ofFloat(badge, "scaleY", 1f, 1.04f).apply {
-            duration = 900L
+        val badgePulseY = ObjectAnimator.ofFloat(badge, "scaleY", 1f, 1.05f).apply {
+            duration = 850L
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
         }
@@ -224,9 +241,9 @@ class AlarmAlertActivity : AppCompatActivity() {
 
         clockView = TextView(this).apply {
             text = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            textSize = 34f
+            textSize = 36f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#5B6AD0"))
+            setTextColor(Color.parseColor(if (isDark) "#93C5FD" else "#4338CA"))
             gravity = Gravity.CENTER
         }
 
@@ -234,7 +251,7 @@ class AlarmAlertActivity : AppCompatActivity() {
             text = schedule.courseName
             textSize = 22f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#1E2430"))
+            setTextColor(Color.parseColor(if (isDark) "#F1F5F9" else "#0F172A"))
             gravity = Gravity.CENTER
         }
 
@@ -251,8 +268,11 @@ class AlarmAlertActivity : AppCompatActivity() {
 
         val subtitleView = TextView(this).apply {
             text = timeText
-            textSize = 14f
-            setTextColor(Color.parseColor("#5A6577"))
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor(if (isDark) "#CBD5E1" else "#475569"))
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            background = LiquidGlassKit.glassSurface(this@AlarmAlertActivity, isDark, 14f, strongRim = false)
             gravity = Gravity.CENTER
         }
 
@@ -261,7 +281,7 @@ class AlarmAlertActivity : AppCompatActivity() {
         card.addView(clockView)
         card.addView(space(10))
         card.addView(titleView)
-        card.addView(space(6))
+        card.addView(space(8))
         card.addView(subtitleView)
 
         if (mathRequired) {
@@ -273,7 +293,7 @@ class AlarmAlertActivity : AppCompatActivity() {
                 text = "Tantangan Pagi: $a + $b = ?"
                 textSize = 14f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.parseColor("#1E2430"))
+                setTextColor(Color.parseColor(if (isDark) "#F1F5F9" else "#0F172A"))
                 gravity = Gravity.CENTER
             }
 
@@ -281,14 +301,10 @@ class AlarmAlertActivity : AppCompatActivity() {
                 hint = "Ketik hasil hitungan"
                 inputType = InputType.TYPE_CLASS_NUMBER
                 gravity = Gravity.CENTER
-                setTextColor(Color.parseColor("#1E2430"))
-                setHintTextColor(Color.parseColor("#5A6577"))
+                setTextColor(Color.parseColor(if (isDark) "#F1F5F9" else "#0F172A"))
+                setHintTextColor(Color.parseColor("#64748B"))
                 setPadding(dp(14), dp(10), dp(14), dp(10))
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#F8F9FA"))
-                    cornerRadius = dp(14).toFloat()
-                    setStroke(dp(1), Color.parseColor("#D5DCE6"))
-                }
+                background = LiquidGlassKit.glassSurface(this@AlarmAlertActivity, isDark, 16f)
             }
             mathInput = edit
             card.addView(space(16))
@@ -297,7 +313,7 @@ class AlarmAlertActivity : AppCompatActivity() {
             card.addView(edit, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
-        val btnPortal = makeActionButton("Buka E-Learning Matkul", "#5B6AD0") {
+        val btnPortal = makeActionButton("Buka E-Learning Matkul", "#4F46E5") {
             if (!validateMath()) return@makeActionButton
             stopActiveAlarm()
             cancelNotif(schedule.id)
@@ -331,15 +347,26 @@ class AlarmAlertActivity : AppCompatActivity() {
         }
 
         card.addView(space(22))
-        card.addView(btnPortal, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+        card.addView(btnPortal, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
         card.addView(space(10))
-        card.addView(btnAttend, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+        card.addView(btnAttend, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
         card.addView(space(10))
-        card.addView(btnSnooze, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+        card.addView(btnSnooze, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
 
-        root.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        setContentView(root)
+        centerWrap.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        rootFrame.addView(centerWrap)
+        setContentView(rootFrame)
         handler.post(clockRunnable)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        auroraView.startMotion()
+    }
+
+    override fun onPause() {
+        auroraView.stopMotion()
+        super.onPause()
     }
 
     private fun validateMath(): Boolean {
@@ -364,12 +391,11 @@ class AlarmAlertActivity : AppCompatActivity() {
             isAllCaps = false
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#F8F9FA"))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor(hexColor))
-                cornerRadius = dp(25).toFloat()
-            }
+            setTextColor(Color.parseColor("#F8FAFC"))
+            background = LiquidGlassKit.pillGlassSurface(this@AlarmAlertActivity, hexColor, "#A6F8FAFC", 26f)
+            LiquidGlassKit.applyGlassElevation(this, 6f, false)
             setOnClickListener { onClick() }
+            LiquidGlassKit.attachLiquidTouch(this, 0.95f)
         }
     }
 
