@@ -3,4 +3,7 @@
     <cache-path
         name="exported_pdfs"
         path="pdfs/" />
+    <files-path
+        name="kuliah_vault_files"
+        path="." />
 </paths>
