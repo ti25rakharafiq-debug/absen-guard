@@ -1,5 +1,6 @@
 package com.absenguard.app
 
+import android.animation.ValueAnimator
 import android.Manifest
 import android.app.AlarmManager
 import android.app.AlertDialog
