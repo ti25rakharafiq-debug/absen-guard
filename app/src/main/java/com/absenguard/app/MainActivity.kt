@@ -31,6 +31,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -202,7 +203,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
         })
         titleCol.addView(TextView(this).apply {
-            text = "E-Learning UBP • Liquid Glass"
+            text = "E-Learning UBP • Dynamic Island"
             textSize = 12f
             setTextColor(paletteSubtext())
         })
@@ -255,14 +256,14 @@ class MainActivity : AppCompatActivity() {
             LiquidGlassKit.applyGlassElevation(this, 4f, isDarkMode())
         }
         permissionCard.addView(TextView(this).apply {
-            text = "Izin Alarm & Notifikasi Sistem Belum Lengkap"
+            text = "Izin Alarm, Notifikasi & Dynamic Island Belum Lengkap"
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor(if (isDarkMode()) "#FCA5A5" else "#DC2626"))
         })
         permissionCard.addView(space(4))
         permissionCard.addView(TextView(this).apply {
-            text = "Aktifkan izin notifikasi, alarm presisi, dan bebas hemat baterai agar dering selalu tepat waktu."
+            text = "Aktifkan izin notifikasi, alarm presisi, bebas hemat baterai, dan tampil di atas aplikasi lain."
             textSize = 12f
             setTextColor(paletteText())
         })
@@ -293,6 +294,9 @@ class MainActivity : AppCompatActivity() {
             val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
             if (!am.canScheduleExactAlarms()) return true
         }
+        if (db.getSetting("dynamic_island_enabled", "1") == "1" && !Settings.canDrawOverlays(this)) {
+            return true
+        }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         return !pm.isIgnoringBatteryOptimizations(packageName)
     }
@@ -315,6 +319,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
+        if (db.getSetting("dynamic_island_enabled", "1") == "1" && !Settings.canDrawOverlays(this)) {
+            openOverlayPermissionSettings()
+            return
+        }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
             try {
@@ -322,6 +330,15 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
+        }
+    }
+
+    private fun openOverlayPermissionSettings() {
+        Toast.makeText(this, "Aktifkan 'Tampilkan di atas aplikasi lain' untuk Dynamic Island", Toast.LENGTH_LONG).show()
+        try {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
         }
     }
 
@@ -454,6 +471,18 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
         })
         card.addView(space(8))
+        card.addView(makeSwitchRow("Dynamic Island Kamera (Punch-Hole)", "dynamic_island_enabled", true) { enabled ->
+            if (enabled) {
+                if (!Settings.canDrawOverlays(this)) {
+                    openOverlayPermissionSettings()
+                } else {
+                    DynamicIslandService.show(this, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
+                }
+            } else {
+                DynamicIslandService.dismiss(this)
+            }
+            updatePermissionVisibility()
+        })
         card.addView(makeSwitchRow("Mode Dering Suara", "global_ring", true))
         card.addView(makeSwitchRow("Mode Getar HP", "global_vibrate", true))
         card.addView(makeSwitchRow("Mode Notifikasi Pop-up", "global_notif", true))
@@ -461,26 +490,48 @@ class MainActivity : AppCompatActivity() {
         card.addView(space(12))
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val test = Button(this).apply {
-            text = "Tes Dering"
+        val testAlarm = Button(this).apply {
+            text = "Tes Alarm"
             isAllCaps = false
-            textSize = 12f
+            textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteLightText())
-            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#4F46E5", "#99F8FAFC", 18f)
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#4F46E5", "#99F8FAFC", 16f)
             setOnClickListener {
                 AlarmScheduler.triggerInstantTest(this@MainActivity)
                 Toast.makeText(this@MainActivity, "Tes alarm aktif 3 detik", Toast.LENGTH_SHORT).show()
             }
             LiquidGlassKit.attachLiquidTouch(this)
         }
+        val testIsland = Button(this).apply {
+            text = "Tes Island"
+            isAllCaps = false
+            textSize = 11f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#0F172A", "#99F8FAFC", 16f)
+            setOnClickListener {
+                if (!Settings.canDrawOverlays(this@MainActivity)) {
+                    openOverlayPermissionSettings()
+                } else {
+                    DynamicIslandService.show(
+                        this@MainActivity,
+                        AlarmScheduler.TEST_SCHEDULE_ID,
+                        isPreReminder = false,
+                        isTest = true
+                    )
+                    Toast.makeText(this@MainActivity, "Ketuk kapsul kamera untuk memperluas, geser atas untuk tutup", Toast.LENGTH_SHORT).show()
+                }
+            }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }
         val portal = Button(this).apply {
             text = "E-Learning"
             isAllCaps = false
-            textSize = 12f
+            textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteLightText())
-            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 18f)
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 16f)
             setOnClickListener {
                 val nextSchedule = AlarmScheduler.getNextUpcomingSchedule(this@MainActivity)?.first
                 openCoursePortal(nextSchedule)
@@ -490,19 +541,21 @@ class MainActivity : AppCompatActivity() {
         val silent = Button(this).apply {
             text = getSilentButtonLabel()
             isAllCaps = false
-            textSize = 12f
+            textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteLightText())
-            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#D97706", "#99F8FAFC", 18f)
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#D97706", "#99F8FAFC", 16f)
             setOnClickListener { toggleSilentMode(this) }
             LiquidGlassKit.attachLiquidTouch(this)
         }
-        val p1 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4) }
-        val p2 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4); marginEnd = dp(4) }
-        val p3 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4) }
-        row.addView(test, p1)
-        row.addView(portal, p2)
-        row.addView(silent, p3)
+        val p1 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) }
+        val p2 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3); marginEnd = dp(3) }
+        val p3 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3); marginEnd = dp(3) }
+        val p4 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) }
+        row.addView(testAlarm, p1)
+        row.addView(testIsland, p2)
+        row.addView(portal, p3)
+        row.addView(silent, p4)
         card.addView(row)
         mainContent.addView(card)
         mainContent.addView(space(14))
@@ -524,7 +577,7 @@ class MainActivity : AppCompatActivity() {
         return if (nm.isNotificationPolicyAccessGranted && am.ringerMode == AudioManager.RINGER_MODE_VIBRATE) {
             "Hening ✓"
         } else {
-            "Mode Hening"
+            "Hening"
         }
     }
 
@@ -547,7 +600,12 @@ class MainActivity : AppCompatActivity() {
         button.text = getSilentButtonLabel()
     }
 
-    private fun makeSwitchRow(label: String, settingKey: String, defaultOn: Boolean): LinearLayout {
+    private fun makeSwitchRow(
+        label: String,
+        settingKey: String,
+        defaultOn: Boolean,
+        onExtraChange: ((Boolean) -> Unit)? = null
+    ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -563,6 +621,7 @@ class MainActivity : AppCompatActivity() {
         val toggle = LiquidToggleSwitch(this, initial, isDarkMode()) { checked ->
             db.setSetting(settingKey, if (checked) "1" else "0")
             AlarmScheduler.scheduleAll(this@MainActivity)
+            onExtraChange?.invoke(checked)
         }
         row.addView(text)
         row.addView(toggle)
@@ -661,7 +720,6 @@ class MainActivity : AppCompatActivity() {
                 filterPillIndicator.layoutParams = lp
                 filterPillIndicator.translationX = targetX
             } else {
-                val startX = filterPillIndicator.translationX
                 val startW = filterPillIndicator.width.takeIf { it > 0 } ?: targetW
                 filterPillIndicator.animate()
                     .translationX(targetX)
@@ -1137,6 +1195,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSettingsDialog() {
+        val scroll = ScrollView(this)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(16), dp(20), dp(8))
@@ -1150,6 +1209,57 @@ class MainActivity : AppCompatActivity() {
         val urlInput = EditText(this).apply {
             setText(db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php"))
         }
+
+        val currentOffsetY = (db.getSetting("island_offset_y", "0").toIntOrNull() ?: 0).coerceIn(-20, 30)
+        val offsetYLabel = TextView(this).apply {
+            text = "Kalibrasi Posisi Kamera (Atas/Bawah): ${currentOffsetY}dp"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+        }
+        val offsetYSeek = SeekBar(this).apply {
+            max = 50
+            progress = currentOffsetY + 20
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                    val dpVal = value - 20
+                    offsetYLabel.text = "Kalibrasi Posisi Kamera (Atas/Bawah): ${dpVal}dp"
+                    db.setSetting("island_offset_y", dpVal.toString())
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    if (Settings.canDrawOverlays(this@MainActivity)) {
+                        DynamicIslandService.show(this@MainActivity, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
+                    }
+                }
+            })
+        }
+
+        val currentWidthExtra = (db.getSetting("island_width_extra", "0").toIntOrNull() ?: 0).coerceIn(-30, 60)
+        val widthExtraLabel = TextView(this).apply {
+            text = "Kalibrasi Lebar Kapsul Island: ${currentWidthExtra}dp"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+        }
+        val widthExtraSeek = SeekBar(this).apply {
+            max = 90
+            progress = currentWidthExtra + 30
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                    val dpVal = value - 30
+                    widthExtraLabel.text = "Kalibrasi Lebar Kapsul Island: ${dpVal}dp"
+                    db.setSetting("island_width_extra", dpVal.toString())
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    if (Settings.canDrawOverlays(this@MainActivity)) {
+                        DynamicIslandService.show(this@MainActivity, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
+                    }
+                }
+            })
+        }
+
         val mathSwitch = SwitchCompat(this).apply {
             text = "Tantangan Hitungan Pagi"
             isChecked = db.getSetting("math_dismiss", "0") == "1"
@@ -1179,6 +1289,12 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(urlLabel)
         container.addView(urlInput)
+        container.addView(space(10))
+        container.addView(offsetYLabel)
+        container.addView(offsetYSeek)
+        container.addView(space(6))
+        container.addView(widthExtraLabel)
+        container.addView(widthExtraSeek)
         container.addView(space(8))
         container.addView(mathSwitch)
         container.addView(darkSwitch)
@@ -1186,9 +1302,11 @@ class MainActivity : AppCompatActivity() {
         container.addView(resetRingButton)
         container.addView(backupButton)
         container.addView(restoreButton)
+        scroll.addView(container)
+
         AlertDialog.Builder(this)
             .setTitle("Pengaturan AbsenGuard")
-            .setView(container)
+            .setView(scroll)
             .setPositiveButton("Simpan") { _, _ ->
                 db.setSetting("portal_url", urlInput.text.toString().trim()
                     .ifEmpty { "https://elearning.ubpkarawang.ac.id/login/index.php" })
