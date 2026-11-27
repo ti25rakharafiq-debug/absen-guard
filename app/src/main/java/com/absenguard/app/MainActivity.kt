@@ -733,7 +733,7 @@ class MainActivity : AppCompatActivity() {
                     .setInterpolator(OvershootInterpolator(1.15f))
                     .start()
 
-                android.animation.ValueAnimator.ofInt(startW, targetW).apply {
+                ValueAnimator.ofInt(startW, targetW).apply {
                     duration = 260L
                     interpolator = DecelerateInterpolator()
                     addUpdateListener { anim ->
@@ -1301,13 +1301,11 @@ class MainActivity : AppCompatActivity() {
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             }
 
-            // Top Banner
             canvas.drawRoundRect(RectF(32f, 32f, (pageWidth - 32).toFloat(), 112f), 14f, 14f, bannerPaint)
             canvas.drawText("REKAPITULASI KEHADIRAN PERKULIAHAN", 48f, 64f, titlePaint)
             val datePrinted = SimpleDateFormat("dd MMMM yyyy, HH:mm", Locale.getDefault()).format(Date())
             canvas.drawText("AbsenGuard • Universitas Buana Perjuangan Karawang • Dicetak: $datePrinted", 48f, 88f, subBannerPaint)
 
-            // Summary KPIs
             var totalHadir = 0
             var totalSesi = 0
             for (s in schedules) {
@@ -1375,7 +1373,6 @@ class MainActivity : AppCompatActivity() {
                 boldTextPaint
             )
 
-            // Section 2: Detailed Logs
             y += 28f
             if (y > pageHeight - 90) {
                 pdf.finishPage(page)
@@ -1460,53 +1457,75 @@ class MainActivity : AppCompatActivity() {
             setText(db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php"))
         }
 
-        val currentOffsetY = (db.getSetting("island_offset_y", "0").toIntOrNull() ?: 0).coerceIn(-20, 30)
+        val currentOffsetY = (db.getSetting("island_offset_y", "0").toIntOrNull() ?: 0).coerceIn(-15, 40)
         val offsetYLabel = TextView(this).apply {
-            text = "Kalibrasi Posisi Kamera (Atas/Bawah): ${currentOffsetY}dp"
+            text = "Posisi Kamera (Atas / Bawah): ${currentOffsetY}dp"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteText())
         }
         val offsetYSeek = SeekBar(this).apply {
-            max = 50
-            progress = currentOffsetY + 20
+            max = 55
+            progress = currentOffsetY + 15
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                    val dpVal = value - 20
-                    offsetYLabel.text = "Kalibrasi Posisi Kamera (Atas/Bawah): ${dpVal}dp"
+                    val dpVal = value - 15
+                    offsetYLabel.text = "Posisi Kamera (Atas / Bawah): ${dpVal}dp"
                     db.setSetting("island_offset_y", dpVal.toString())
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {
-                    if (Settings.canDrawOverlays(this@MainActivity)) {
+                    if (fromUser && Settings.canDrawOverlays(this@MainActivity)) {
                         DynamicIslandService.show(this@MainActivity, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
                     }
                 }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
 
-        val currentWidthExtra = (db.getSetting("island_width_extra", "0").toIntOrNull() ?: 0).coerceIn(-30, 60)
+        val currentWidthExtra = (db.getSetting("island_width_extra", "0").toIntOrNull() ?: 0).coerceIn(-60, 60)
         val widthExtraLabel = TextView(this).apply {
-            text = "Kalibrasi Lebar Kapsul Island: ${currentWidthExtra}dp"
+            text = "Panjang Kapsul (Kiri / Kanan): ${currentWidthExtra}dp"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteText())
         }
         val widthExtraSeek = SeekBar(this).apply {
-            max = 90
-            progress = currentWidthExtra + 30
+            max = 120
+            progress = currentWidthExtra + 60
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                    val dpVal = value - 30
-                    widthExtraLabel.text = "Kalibrasi Lebar Kapsul Island: ${dpVal}dp"
+                    val dpVal = value - 60
+                    widthExtraLabel.text = "Panjang Kapsul (Kiri / Kanan): ${dpVal}dp"
                     db.setSetting("island_width_extra", dpVal.toString())
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {
-                    if (Settings.canDrawOverlays(this@MainActivity)) {
+                    if (fromUser && Settings.canDrawOverlays(this@MainActivity)) {
                         DynamicIslandService.show(this@MainActivity, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
                     }
                 }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+
+        val currentHeightExtra = (db.getSetting("island_height_extra", "0").toIntOrNull() ?: 0).coerceIn(-10, 24)
+        val heightExtraLabel = TextView(this).apply {
+            text = "Tinggi / Tebal Kapsul (Lebar): ${currentHeightExtra}dp"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+        }
+        val heightExtraSeek = SeekBar(this).apply {
+            max = 34
+            progress = currentHeightExtra + 10
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                    val dpVal = value - 10
+                    heightExtraLabel.text = "Tinggi / Tebal Kapsul (Lebar): ${dpVal}dp"
+                    db.setSetting("island_height_extra", dpVal.toString())
+                    if (fromUser && Settings.canDrawOverlays(this@MainActivity)) {
+                        DynamicIslandService.show(this@MainActivity, AlarmScheduler.TEST_SCHEDULE_ID, isPreReminder = false, isTest = true)
+                    }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
 
@@ -1545,6 +1564,9 @@ class MainActivity : AppCompatActivity() {
         container.addView(space(6))
         container.addView(widthExtraLabel)
         container.addView(widthExtraSeek)
+        container.addView(space(6))
+        container.addView(heightExtraLabel)
+        container.addView(heightExtraSeek)
         container.addView(space(8))
         container.addView(mathSwitch)
         container.addView(darkSwitch)
