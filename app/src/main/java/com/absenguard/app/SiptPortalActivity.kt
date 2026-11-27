@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.util.Calendar
 
 class SiptPortalActivity : AppCompatActivity() {
@@ -41,6 +42,13 @@ class SiptPortalActivity : AppCompatActivity() {
         val passedUrl = intent.getStringExtra(EXTRA_COURSE_URL)?.trim().orEmpty()
         val passedName = intent.getStringExtra(EXTRA_COURSE_NAME)?.trim().orEmpty()
 
+        window.statusBarColor = Color.parseColor("#0F172A")
+        window.navigationBarColor = Color.parseColor("#0F172A")
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
         val activeId = if (scheduleId > 0) scheduleId else findNearestActiveSchedule(db)
         val schedule = if (activeId > 0) db.getScheduleById(activeId) else null
 
@@ -59,10 +67,14 @@ class SiptPortalActivity : AppCompatActivity() {
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1C212C"))
-            }
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    Color.parseColor("#0F172A"),
+                    Color.parseColor("#1E293B")
+                )
+            )
         }
 
         val back = Button(this).apply {
@@ -71,12 +83,10 @@ class SiptPortalActivity : AppCompatActivity() {
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#F1F5F9"))
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#2D3545"))
-                cornerRadius = dp(14).toFloat()
-            }
+            setPadding(dp(11), dp(6), dp(11), dp(6))
+            background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#334155", "#66F8FAFC", 16f)
             setOnClickListener { finish() }
+            LiquidGlassKit.attachLiquidTouch(this)
         }
 
         val title = TextView(this).apply {
@@ -85,7 +95,7 @@ class SiptPortalActivity : AppCompatActivity() {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#F1F5F9"))
+            setTextColor(Color.parseColor("#F8FAFC"))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(8)
                 marginEnd = dp(8)
@@ -98,13 +108,11 @@ class SiptPortalActivity : AppCompatActivity() {
             isAllCaps = false
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#F8F9FA"))
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#5B6AD0"))
-                cornerRadius = dp(14).toFloat()
-            }
+            setTextColor(Color.parseColor("#F8FAFC"))
+            setPadding(dp(11), dp(6), dp(11), dp(6))
+            background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#4F46E5", "#99F8FAFC", 16f)
             setOnClickListener { fillCredentials(false) }
+            LiquidGlassKit.attachLiquidTouch(this)
         }
 
         val confirm = Button(this).apply {
@@ -112,12 +120,9 @@ class SiptPortalActivity : AppCompatActivity() {
             isAllCaps = false
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#F8F9FA"))
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#2E8B57"))
-                cornerRadius = dp(14).toFloat()
-            }
+            setTextColor(Color.parseColor("#F8FAFC"))
+            setPadding(dp(11), dp(6), dp(11), dp(6))
+            background = LiquidGlassKit.pillGlassSurface(this@SiptPortalActivity, "#2E8B57", "#99F8FAFC", 16f)
             setOnClickListener {
                 if (activeId > 0) {
                     db.getScheduleById(activeId)?.let {
@@ -128,6 +133,7 @@ class SiptPortalActivity : AppCompatActivity() {
                 NextClassWidgetProvider.updateAllWidgets(this@SiptPortalActivity)
                 finish()
             }
+            LiquidGlassKit.attachLiquidTouch(this)
         }
 
         topBar.addView(back)
@@ -240,9 +246,9 @@ class SiptPortalActivity : AppCompatActivity() {
                     if(txt.indexOf('submit attendance')!==-1 || txt.indexOf('ajukan kehadiran')!==-1 || txt.indexOf('presensi')!==-1 || href.indexOf('attendance.php')!==-1){
                         el.style.outline='3px solid #2E8B57';
                         el.style.backgroundColor='#E6F4EA';
-                        el.style.color='#1E2430';
+                        el.style.color='#0F172A';
                         el.style.padding='8px 14px';
-                        el.style.borderRadius='10px';
+                        el.style.borderRadius='12px';
                         el.style.fontWeight='bold';
                         el.scrollIntoView({behavior:'smooth', block:'center'});
                         break;
