@@ -21,6 +21,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AbsenGuard">
 
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -67,13 +77,62 @@
 
         <receiver
             android:name=".NextClassWidgetProvider"
-            android:exported="true">
+            android:exported="true"
+            android:label="AbsenGuard • Jadwal Terdekat">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/appwidget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".TodayScheduleWidgetProvider"
+            android:exported="true"
+            android:label="AbsenGuard • Jadwal Hari Ini (4x2)">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/appwidget_today_info" />
+        </receiver>
+
+        <receiver
+            android:name=".CircleOrbWidgetProvider"
+            android:exported="true"
+            android:label="AbsenGuard • Kapsul Lingkaran">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/appwidget_circle_info" />
+        </receiver>
+
+        <receiver
+            android:name=".DigitalClockWidgetProvider"
+            android:exported="true"
+            android:label="AbsenGuard • Jam Digital Glass">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/appwidget_digital_info" />
+        </receiver>
+
+        <receiver
+            android:name=".AnalogClockWidgetProvider"
+            android:exported="true"
+            android:label="AbsenGuard • Jam Analog Glass">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/appwidget_analog_info" />
         </receiver>
 
     </application>
