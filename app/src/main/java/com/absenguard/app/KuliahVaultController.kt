@@ -2,12 +2,12 @@ package com.absenguard.app
 
 import android.Manifest
 import android.app.AlertDialog
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
@@ -25,7 +25,6 @@ import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -103,7 +102,7 @@ class KuliahVaultController(
 
         val folder = selectedPdfFolder
         if (folder == null) {
-            container.addView(sectionHeader("Materi PDF Kuliah", "Otomatis diklasifikasikan ke folder mata kuliah dari isi teksnya"))
+            container.addView(sectionHeader("Materi PDF Kuliah", "Layout-aware parser: otomatis pisah bab, poin inti & rumus TI"))
             container.addView(space(12))
 
             val importBtn = glassActionButton("+ Impor PDF Baru", "#4F46E5") {
@@ -251,7 +250,7 @@ class KuliahVaultController(
                         setTextColor(subTextColor())
                     })
                     info.addView(TextView(activity).apply {
-                        text = "${analysis.definitions.size} definisi • ${analysis.formulas.size} rumus"
+                        text = "${analysis.sections.size} topik • ${analysis.definitions.size} istilah • ${analysis.formulaDetails.size} rumus"
                         textSize = 11f
                         setTypeface(null, Typeface.BOLD)
                         setTextColor(accentTextColor())
@@ -275,8 +274,8 @@ class KuliahVaultController(
 
     fun handlePickedPdfUri(uri: Uri) {
         val loadingDialog = AlertDialog.Builder(activity)
-            .setTitle("Memproses PDF")
-            .setMessage("Membaca teks, merangkum materi, dan mendeteksi mata kuliah...")
+            .setTitle("Memproses Tata Letak PDF")
+            .setMessage("Membaca struktur bab, merangkum poin inti & mendeteksi rumus...")
             .setCancelable(false)
             .show()
 
@@ -284,7 +283,7 @@ class KuliahVaultController(
             try {
                 val rawName = queryDisplayName(uri) ?: "Materi_${System.currentTimeMillis()}.pdf"
                 val file = KuliahVaultEngine.importFileToInternalStorage(activity, uri, "pdf", rawName.removeSuffix(".pdf"), "pdf")
-                val extraction = KuliahVaultEngine.extractPdfInfo(file)
+                val extraction = KuliahVaultEngine.extractPdfInfo(activity, file)
                 if (!extraction.ok) {
                     mainHandler.post {
                         loadingDialog.dismiss()
@@ -298,11 +297,7 @@ class KuliahVaultController(
                     return@Thread
                 }
                 val cls = KuliahVaultEngine.classifyText(extraction.text)
-                val analysis = if (extraction.scanned) {
-                    TextAnalysisResult(emptyList(), emptyList(), emptyList())
-                } else {
-                    KuliahVaultEngine.analyzeText(extraction.text)
-                }
+                val analysis = KuliahVaultEngine.analyzeText(extraction.text)
 
                 mainHandler.post {
                     loadingDialog.dismiss()
@@ -341,8 +336,8 @@ class KuliahVaultController(
         val detectInfo = TextView(activity).apply {
             val pct = (cls.share * 100).toInt()
             val kw = if (cls.matchedKeywords.isNotEmpty()) "\nKata kunci: ${cls.matchedKeywords.joinToString(", ")}" else ""
-            val scanWarn = if (extraction.scanned) "\n⚠️ PDF hasil pindai gambar (teks minim)." else ""
-            text = "Deteksi Otomatis: ${cls.label} ($pct%)$kw$scanWarn"
+            val ocrNote = if (extraction.scanned) "\n✓ PDF hasil scan berhasil dibaca via OCR otomatis." else ""
+            text = "Deteksi Otomatis: ${cls.label} ($pct%)\nTerdeteksi: ${analysis.sections.size} topik • ${analysis.formulaDetails.size} rumus • ${analysis.definitions.size} istilah$kw$ocrNote"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#4338CA"))
@@ -389,22 +384,23 @@ class KuliahVaultController(
     }
 
     private fun showPdfOptionsDialog(pdf: VaultPdf, container: LinearLayout) {
-        val opts = arrayOf("Buka Pembaca & Ringkasan", "Buka File PDF Asli", "Pindahkan ke Folder Lain", "Ganti Nama", "Hapus PDF")
+        val opts = arrayOf("Buka Pembaca Terstruktur", "Analisis Ulang Tata Letak PDF", "Buka File PDF Asli", "Pindahkan ke Folder Lain", "Ganti Nama", "Hapus PDF")
         AlertDialog.Builder(activity)
             .setTitle(pdf.title)
             .setItems(opts) { _, which ->
                 when (which) {
                     0 -> showPdfReaderDialog(pdf.id)
-                    1 -> openExternalPdf(pdf.fileUri)
-                    2 -> showMoveCourseDialog(pdf.courseKey) { newKey ->
+                    1 -> reanalyzeStoredPdf(pdf.id, container)
+                    2 -> openExternalPdf(pdf.fileUri)
+                    3 -> showMoveCourseDialog(pdf.courseKey) { newKey ->
                         db.moveVaultPdf(pdf.id, newKey)
                         renderPdfTab(container)
                     }
-                    3 -> showRenameDialog("Ganti Nama PDF", pdf.title) { newTitle ->
+                    4 -> showRenameDialog("Ganti Nama PDF", pdf.title) { newTitle ->
                         db.renameVaultPdf(pdf.id, newTitle)
                         renderPdfTab(container)
                     }
-                    4 -> {
+                    5 -> {
                         File(pdf.fileUri).delete()
                         db.deleteVaultPdf(pdf.id)
                         renderPdfTab(container)
@@ -414,109 +410,339 @@ class KuliahVaultController(
             .show()
     }
 
+    private fun reanalyzeStoredPdf(pdfId: Long, container: LinearLayout) {
+        val pdf = db.getVaultPdf(pdfId) ?: return
+        val file = File(pdf.fileUri)
+        if (!file.exists()) {
+            Toast.makeText(activity, "File PDF tidak ditemukan", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val loading = AlertDialog.Builder(activity)
+            .setTitle("Memperbarui Ekstraksi PDF")
+            .setMessage("Membangun ulang struktur bab & deteksi rumus...")
+            .setCancelable(false)
+            .show()
+
+        Thread {
+            val ext = KuliahVaultEngine.extractPdfInfo(activity, file)
+            val analysis = KuliahVaultEngine.analyzeText(ext.text)
+            db.deleteVaultPdf(pdf.id)
+            db.insertVaultPdf(
+                courseKey = pdf.courseKey,
+                title = pdf.title,
+                fileUri = pdf.fileUri,
+                pageCount = ext.pageCount,
+                bodyText = ext.text,
+                analysisJson = KuliahVaultEngine.analysisToJson(analysis),
+                suggestedBase = pdf.suggestedBase,
+                confidence = pdf.confidence
+            )
+            mainHandler.post {
+                loading.dismiss()
+                Toast.makeText(activity, "Materi PDF berhasil diperbarui!", Toast.LENGTH_SHORT).show()
+                renderPdfTab(container)
+            }
+        }.start()
+    }
+
+    /**
+     * Structured 4-Tab Study Reader:
+     * 1. Intisari (Poin Kunci TF-IDF)
+     * 2. Rumus (Kartu Rumus + Keterangan Variabel + Simpan Bank Rumus)
+     * 3. Glosarium (Definisi Istilah Penting)
+     * 4. Materi Bab (Struktur Bab & Paragraf Bersih)
+     */
     fun showPdfReaderDialog(pdfId: Long, highlightQuery: String = "") {
         val pdf = db.getVaultPdf(pdfId) ?: return
-        val analysis = KuliahVaultEngine.parseAnalysisJson(pdf.analysisJson)
-
-        val scroll = ScrollView(activity)
-        val box = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
+        val parsed = KuliahVaultEngine.parseAnalysisJson(pdf.analysisJson)
+        val analysis = if (parsed.sections.isEmpty() && pdf.bodyText.isNotBlank()) {
+            KuliahVaultEngine.analyzeText(pdf.bodyText)
+        } else {
+            parsed
         }
 
-        box.addView(TextView(activity).apply {
-            text = "${KuliahVaultEngine.courseByKey(pdf.courseKey).name} • ${pdf.pageCount} halaman"
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setBackgroundColor(Color.parseColor("#F8FAFC"))
+        }
+
+        // Top Meta Bar
+        val metaRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        metaRow.addView(TextView(activity).apply {
+            text = "${KuliahVaultEngine.courseByKey(pdf.courseKey).name} • ${pdf.pageCount} hal"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#0284C7"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        box.addView(space(10))
-
-        val openRawBtn = Button(activity).apply {
-            text = "Buka Dokumen PDF Asli"
+        metaRow.addView(Button(activity).apply {
+            text = "PDF Asli"
             isAllCaps = false
+            textSize = 11f
             setOnClickListener { openExternalPdf(pdf.fileUri) }
-        }
-        box.addView(openRawBtn)
-        box.addView(space(12))
+        })
+        root.addView(metaRow)
+        root.addView(space(8))
 
-        box.addView(boldLabel("Ringkasan Otomatis (${analysis.summary.size})"))
-        if (analysis.summary.isEmpty()) {
-            box.addView(mutedLabel("Ringkasan tidak tersedia untuk dokumen ini."))
-        } else {
-            analysis.summary.forEach { s ->
-                box.addView(TextView(activity).apply {
-                    text = "• $s"
-                    textSize = 13f
-                    setPadding(0, dp(4), 0, dp(4))
-                })
-            }
-        }
-        box.addView(space(12))
+        // Segmented Tab Strip
+        var activeSubTab = if (highlightQuery.isNotBlank()) 3 else 0
+        val tabLabels = listOf(
+            "Intisari (${analysis.summary.size})",
+            "Rumus (${analysis.formulaDetails.size})",
+            "Glosarium (${analysis.definitions.size})",
+            "Materi Bab (${analysis.sections.size})"
+        )
+        val tabScroll = HorizontalScrollView(activity).apply { isHorizontalScrollBarEnabled = false }
+        val tabRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+        val tabViews = mutableListOf<TextView>()
 
-        box.addView(boldLabel("Definisi Penting (${analysis.definitions.size})"))
-        if (analysis.definitions.isEmpty()) {
-            box.addView(mutedLabel("Tidak ada pola definisi terdeteksi."))
-        } else {
-            analysis.definitions.forEach { (term, desc) ->
-                box.addView(TextView(activity).apply {
-                    text = "▸ $term: $desc"
-                    textSize = 13f
-                    setPadding(0, dp(4), 0, dp(4))
-                })
-            }
+        val bodyScroll = ScrollView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420))
         }
-        box.addView(space(12))
+        val bodyBox = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(12))
+        }
+        bodyScroll.addView(bodyBox)
 
-        box.addView(boldLabel("Rumus Terdeteksi (${analysis.formulas.size})"))
-        if (analysis.formulas.isEmpty()) {
-            box.addView(mutedLabel("Tidak ada rumus terdeteksi."))
-        } else {
-            analysis.formulas.forEach { (label, expr) ->
-                val fRow = LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(10), dp(8), dp(10), dp(8))
-                    setBackgroundColor(Color.parseColor("#FEF3C7"))
+        fun renderReaderBody() {
+            tabViews.forEachIndexed { i, tv ->
+                val sel = i == activeSubTab
+                tv.setTextColor(if (sel) Color.WHITE else Color.parseColor("#1E293B"))
+                tv.background = GradientDrawable().apply {
+                    setColor(Color.parseColor(if (sel) "#4F46E5" else "#E2E8F0"))
+                    cornerRadius = dp(16).toFloat()
                 }
-                fRow.addView(TextView(activity).apply {
-                    text = expr
-                    typeface = Typeface.MONOSPACE
-                    textSize = 13f
-                    setTextColor(Color.parseColor("#0F172A"))
-                })
-                val saveFBtn = Button(activity).apply {
-                    text = "+ Simpan ke Bank Rumus"
-                    isAllCaps = false
-                    textSize = 11f
-                    setOnClickListener {
-                        db.insertVaultFormula(pdf.courseKey, label, expr, "Dari PDF: ${pdf.title}", "pdf")
-                        Toast.makeText(activity, "Rumus disimpan ke Bank Rumus", Toast.LENGTH_SHORT).show()
+            }
+            bodyBox.removeAllViews()
+
+            when (activeSubTab) {
+                0 -> {
+                    if (analysis.summary.isEmpty()) {
+                        bodyBox.addView(readerCard("#FFFFFF", "#CBD5E1", "Ringkasan Otomatis", "Tidak ada kalimat ringkasan yang terdeteksi dari dokumen ini."))
+                    } else {
+                        analysis.summary.forEachIndexed { idx, point ->
+                            bodyBox.addView(
+                                readerCard(
+                                    bgHex = "#EEF2FF",
+                                    borderHex = "#C7D2FE",
+                                    badgeTitle = "POIN INTI #${idx + 1}",
+                                    content = point,
+                                    accentHex = "#4338CA"
+                                ),
+                                matchWrapBottom(8)
+                            )
+                        }
                     }
                 }
-                fRow.addView(saveFBtn)
-                box.addView(fRow, matchWrapBottom(8))
+
+                1 -> {
+                    if (analysis.formulaDetails.isEmpty()) {
+                        bodyBox.addView(readerCard("#FFFFFF", "#CBD5E1", "Deteksi Rumus", "Tidak ditemukan persamaan atau simbol rumus pada dokumen ini."))
+                    } else {
+                        analysis.formulaDetails.forEach { f ->
+                            val card = LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(dp(12), dp(10), dp(12), dp(10))
+                                background = GradientDrawable().apply {
+                                    setColor(Color.parseColor("#FFFBEB"))
+                                    setStroke(dp(1), Color.parseColor("#FCD34D"))
+                                    cornerRadius = dp(14).toFloat()
+                                }
+                            }
+                            card.addView(TextView(activity).apply {
+                                text = f.label
+                                textSize = 11f
+                                setTypeface(null, Typeface.BOLD)
+                                setTextColor(Color.parseColor("#B45309"))
+                            })
+                            card.addView(TextView(activity).apply {
+                                text = f.expression
+                                typeface = Typeface.MONOSPACE
+                                textSize = 14f
+                                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                                setTextColor(Color.parseColor("#0F172A"))
+                                setTextIsSelectable(true)
+                                setPadding(0, dp(4), 0, dp(4))
+                            })
+                            if (f.variableNotes.isNotBlank()) {
+                                card.addView(TextView(activity).apply {
+                                    text = "Keterangan: ${f.variableNotes}"
+                                    textSize = 12f
+                                    setTextColor(Color.parseColor("#475569"))
+                                    setPadding(0, 0, 0, dp(6))
+                                })
+                            }
+                            card.addView(Button(activity).apply {
+                                text = "+ Simpan ke Bank Rumus"
+                                isAllCaps = false
+                                textSize = 11f
+                                setOnClickListener {
+                                    db.insertVaultFormula(
+                                        pdf.courseKey,
+                                        f.label,
+                                        f.expression,
+                                        f.variableNotes.ifBlank { "Dari PDF: ${pdf.title}" },
+                                        "pdf"
+                                    )
+                                    Toast.makeText(activity, "Rumus disimpan ke Bank Rumus", Toast.LENGTH_SHORT).show()
+                                }
+                            })
+                            bodyBox.addView(card, matchWrapBottom(10))
+                        }
+                    }
+                }
+
+                2 -> {
+                    if (analysis.definitions.isEmpty()) {
+                        bodyBox.addView(readerCard("#FFFFFF", "#CBD5E1", "Glosarium Istilah", "Tidak ditemukan pola definisi istilah di dokumen ini."))
+                    } else {
+                        analysis.definitions.forEach { (term, desc) ->
+                            bodyBox.addView(
+                                readerCard(
+                                    bgHex = "#ECFDF5",
+                                    borderHex = "#A7F3D0",
+                                    badgeTitle = term.uppercase(Locale.getDefault()),
+                                    content = desc,
+                                    accentHex = "#047857"
+                                ),
+                                matchWrapBottom(8)
+                            )
+                        }
+                    }
+                }
+
+                3 -> {
+                    if (highlightQuery.isNotBlank()) {
+                        bodyBox.addView(
+                            readerCard(
+                                bgHex = "#FEF3C7",
+                                borderHex = "#F59E0B",
+                                badgeTitle = "HASIL PENCARIAN: \"$highlightQuery\"",
+                                content = KuliahVaultEngine.makeSnippet(pdf.bodyText, highlightQuery.lowercase()),
+                                accentHex = "#B45309"
+                            ),
+                            matchWrapBottom(10)
+                        )
+                    }
+                    if (analysis.sections.isEmpty()) {
+                        bodyBox.addView(
+                            readerCard(
+                                bgHex = "#FFFFFF",
+                                borderHex = "#CBD5E1",
+                                badgeTitle = "TEKS DOKUMEN",
+                                content = pdf.bodyText.take(4000).ifBlank { "(Dokumen kosong)" }
+                            )
+                        )
+                    } else {
+                        analysis.sections.forEach { sec ->
+                            val secCard = LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(dp(12), dp(10), dp(12), dp(10))
+                                background = GradientDrawable().apply {
+                                    setColor(Color.WHITE)
+                                    setStroke(dp(1), Color.parseColor("#CBD5E1"))
+                                    cornerRadius = dp(14).toFloat()
+                                }
+                            }
+                            secCard.addView(TextView(activity).apply {
+                                text = sec.heading
+                                textSize = 14f
+                                setTypeface(null, Typeface.BOLD)
+                                setTextColor(Color.parseColor("#1E1B4B"))
+                            })
+                            if (sec.bullets.isNotEmpty()) {
+                                secCard.addView(space(4))
+                                sec.bullets.forEach { b ->
+                                    secCard.addView(TextView(activity).apply {
+                                        text = b
+                                        textSize = 13f
+                                        setTextColor(Color.parseColor("#1E293B"))
+                                        setTextIsSelectable(true)
+                                        setPadding(dp(4), dp(2), 0, dp(2))
+                                    })
+                                }
+                            }
+                            if (sec.body.isNotBlank()) {
+                                secCard.addView(space(4))
+                                secCard.addView(TextView(activity).apply {
+                                    text = sec.body
+                                    textSize = 13f
+                                    setTextColor(Color.parseColor("#334155"))
+                                    setTextIsSelectable(true)
+                                })
+                            }
+                            bodyBox.addView(secCard, matchWrapBottom(10))
+                        }
+                    }
+                }
             }
         }
-        box.addView(space(12))
 
-        box.addView(boldLabel("Kutipan Teks PDF"))
-        val previewText = if (highlightQuery.isNotBlank()) {
-            KuliahVaultEngine.makeSnippet(pdf.bodyText, highlightQuery.lowercase())
-        } else {
-            pdf.bodyText.take(2500).ifBlank { "(PDF hasil scan tanpa lapisan teks)" }
+        tabLabels.forEachIndexed { idx, label ->
+            val tv = TextView(activity).apply {
+                text = label
+                textSize = 11.5f
+                setTypeface(null, Typeface.BOLD)
+                setPadding(dp(12), dp(7), dp(12), dp(7))
+                setOnClickListener {
+                    activeSubTab = idx
+                    renderReaderBody()
+                }
+            }
+            tabViews.add(tv)
+            tabRow.addView(tv, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(6) })
         }
-        box.addView(TextView(activity).apply {
-            text = previewText
-            textSize = 12f
-            setTextIsSelectable(true)
-        })
 
-        scroll.addView(box)
+        tabScroll.addView(tabRow)
+        root.addView(tabScroll)
+        root.addView(space(6))
+        root.addView(bodyScroll)
+        renderReaderBody()
+
         AlertDialog.Builder(activity)
             .setTitle(pdf.title)
-            .setView(scroll)
+            .setView(root)
             .setPositiveButton("Tutup", null)
             .show()
+    }
+
+    private fun readerCard(
+        bgHex: String,
+        borderHex: String,
+        badgeTitle: String,
+        content: String,
+        accentHex: String = "#334155"
+    ): LinearLayout {
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(bgHex))
+                setStroke(dp(1), Color.parseColor(borderHex))
+                cornerRadius = dp(14).toFloat()
+            }
+            addView(TextView(activity).apply {
+                text = badgeTitle
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor(accentHex))
+            })
+            addView(TextView(activity).apply {
+                text = content
+                textSize = 13f
+                setTextColor(Color.parseColor("#0F172A"))
+                setTextIsSelectable(true)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
     }
 
     private fun openExternalPdf(filePath: String) {
@@ -578,7 +804,6 @@ class KuliahVaultController(
         })
         container.addView(space(10))
 
-        // Recorder Card
         val recCard = glassCard()
         val modeRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -641,7 +866,6 @@ class KuliahVaultController(
         }
         container.addView(recCard, matchWrapBottom(14))
 
-        // Saved Recordings List
         val course = KuliahVaultEngine.courseByKey(recordCourseKey)
         val recordings = db.listVaultRecordings(recordCourseKey)
         container.addView(TextView(activity).apply {
@@ -801,7 +1025,7 @@ class KuliahVaultController(
             }
             sr.startListening(intent)
             speechRecognizer = sr
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             recordModeStt = false
             startAudioFileRecorder()
         }
@@ -985,16 +1209,15 @@ class KuliahVaultController(
             .show()
     }
 
-    // ==================== 3. TAB PAPAN TULIS & OCR ====================
+    // ==================== 3. TAB PAPAN TULIS & OCR ANTI-SILAU ====================
 
     fun renderBoardTab(container: LinearLayout) {
         activeTabRenderer = { renderBoardTab(container) }
         container.removeAllViews()
 
-        container.addView(sectionHeader("Scan Papan Tulis & OCR", "Konfirmasi mata kuliah, foto papan tulis, baca teks & rumus offline"))
+        container.addView(sectionHeader("Scan Papan Tulis & OCR", "Hapus kilau lampu kelas, baca teks & pisahkan rumus papan tulis"))
         container.addView(space(10))
 
-        // Step 1 Card
         val step1 = glassCard()
         step1.addView(TextView(activity).apply {
             text = "Langkah 1 • Konfirmasi Mata Kuliah"
@@ -1019,7 +1242,6 @@ class KuliahVaultController(
         step1.addView(confirmBtn, matchWrap())
         container.addView(step1, matchWrapBottom(12))
 
-        // Step 2 Card
         val step2 = glassCard().apply {
             alpha = if (boardCourseConfirmed) 1f else 0.55f
         }
@@ -1058,7 +1280,6 @@ class KuliahVaultController(
         step2.addView(btnRow)
         container.addView(step2, matchWrapBottom(14))
 
-        // Saved Boards
         val course = KuliahVaultEngine.courseByKey(boardCourseKey)
         val boards = db.listVaultBoards(boardCourseKey)
         container.addView(TextView(activity).apply {
@@ -1092,7 +1313,7 @@ class KuliahVaultController(
                     }
                 }
                 info.addView(TextView(activity).apply {
-                    text = "${formatDateTime(b.createdAt)}${if (b.enhanced) " • Scan Tajam" else ""}"
+                    text = "${formatDateTime(b.createdAt)}${if (b.enhanced) " • Anti-Silau Aktif" else ""}"
                     textSize = 12f
                     setTypeface(null, Typeface.BOLD)
                     setTextColor(accentTextColor())
@@ -1123,7 +1344,7 @@ class KuliahVaultController(
     }
 
     private fun showBoardPreviewDialog(sourceUri: Uri) {
-        var useSharp = false
+        var useSharp = true
         var enhancedFile: File? = null
 
         val box = LinearLayout(activity).apply {
@@ -1138,37 +1359,41 @@ class KuliahVaultController(
         box.addView(previewImage, matchWrapBottom(12))
 
         val sharpToggleBtn = Button(activity).apply {
-            text = "Mode Scan Tajam: NONAKTIF (Ketuk untuk Aktifkan)"
+            text = "Memproses Filter Anti-Silau..."
             isAllCaps = false
-            setOnClickListener {
-                useSharp = !useSharp
-                if (useSharp) {
-                    text = "Memproses Kontras Tinggi..."
-                    isEnabled = false
-                    Thread {
-                        try {
-                            val out = enhancedFile ?: KuliahVaultEngine.enhanceWhiteboard(activity, sourceUri)
-                            enhancedFile = out
-                            mainHandler.post {
-                                previewImage.setImageBitmap(BitmapFactory.decodeFile(out.absolutePath))
-                                text = "Mode Scan Tajam: AKTIF ✓"
-                                isEnabled = true
-                            }
-                        } catch (_: Exception) {
-                            mainHandler.post {
-                                useSharp = false
-                                text = "Mode Scan Tajam Gagal (Pakai Asli)"
-                                isEnabled = true
-                            }
-                        }
-                    }.start()
-                } else {
-                    previewImage.setImageURI(sourceUri)
-                    text = "Mode Scan Tajam: NONAKTIF"
-                }
-            }
+            isEnabled = false
         }
         box.addView(sharpToggleBtn)
+
+        // Otomatis jalankan Anti-Silau saat preview dibuka agar hasil langsung tajam
+        Thread {
+            try {
+                val out = KuliahVaultEngine.enhanceWhiteboard(activity, sourceUri)
+                enhancedFile = out
+                mainHandler.post {
+                    previewImage.setImageBitmap(BitmapFactory.decodeFile(out.absolutePath))
+                    sharpToggleBtn.text = "Mode Anti-Silau Papan Tulis: AKTIF ✓ (Ketuk untuk Foto Asli)"
+                    sharpToggleBtn.isEnabled = true
+                }
+            } catch (_: Exception) {
+                mainHandler.post {
+                    useSharp = false
+                    sharpToggleBtn.text = "Mode Foto Asli"
+                    sharpToggleBtn.isEnabled = true
+                }
+            }
+        }.start()
+
+        sharpToggleBtn.setOnClickListener {
+            useSharp = !useSharp
+            if (useSharp && enhancedFile != null) {
+                previewImage.setImageBitmap(BitmapFactory.decodeFile(enhancedFile!!.absolutePath))
+                sharpToggleBtn.text = "Mode Anti-Silau Papan Tulis: AKTIF ✓"
+            } else {
+                previewImage.setImageURI(sourceUri)
+                sharpToggleBtn.text = "Mode Foto Asli (Ketuk untuk Aktifkan Anti-Silau)"
+            }
+        }
 
         AlertDialog.Builder(activity)
             .setTitle("Pratinjau Scan Papan Tulis")
@@ -1176,7 +1401,7 @@ class KuliahVaultController(
             .setPositiveButton("Simpan & Baca Teks (OCR)") { _, _ ->
                 val loading = AlertDialog.Builder(activity)
                     .setTitle("Membaca Teks Papan Tulis")
-                    .setMessage("Menjalankan OCR offline...")
+                    .setMessage("Menjalankan OCR spasial offline...")
                     .setCancelable(false)
                     .show()
 
@@ -1212,31 +1437,45 @@ class KuliahVaultController(
 
     private fun showOcrResultDialog(boardId: Long, ocrText: String) {
         val formulas = KuliahVaultEngine.extractFormulas(ocrText)
+        val nonFormulaLines = ocrText.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !KuliahVaultEngine.looksLikeFormula(it) }
+            .joinToString("\n")
+
         val scroll = ScrollView(activity)
         val box = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(14), dp(18), dp(14))
         }
-        box.addView(boldLabel("Teks Terdeteksi OCR"))
-        box.addView(TextView(activity).apply {
-            text = ocrText.ifBlank { "Tidak ada teks terdeteksi pada gambar ini." }
-            textSize = 13f
-            setTextIsSelectable(true)
-            setPadding(0, dp(6), 0, dp(12))
-        })
+
+        box.addView(
+            readerCard(
+                bgHex = "#F8FAFC",
+                borderHex = "#CBD5E1",
+                badgeTitle = "CATATAN TEORI PAPAN TULIS",
+                content = nonFormulaLines.ifBlank { ocrText.ifBlank { "Tidak ada teks terdeteksi pada gambar ini." } }
+            ),
+            matchWrapBottom(12)
+        )
 
         if (formulas.isNotEmpty()) {
             box.addView(boldLabel("Rumus Terdeteksi (${formulas.size})"))
+            box.addView(space(6))
             formulas.forEach { (label, expr) ->
                 val fBox = LinearLayout(activity).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(dp(10), dp(8), dp(10), dp(8))
-                    setBackgroundColor(Color.parseColor("#FEF3C7"))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#FFFBEB"))
+                        setStroke(dp(1), Color.parseColor("#FCD34D"))
+                        cornerRadius = dp(12).toFloat()
+                    }
                 }
                 fBox.addView(TextView(activity).apply {
                     text = expr
                     typeface = Typeface.MONOSPACE
-                    textSize = 13f
+                    textSize = 14f
+                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
                     setTextColor(Color.parseColor("#0F172A"))
                 })
                 fBox.addView(Button(activity).apply {
@@ -1307,7 +1546,6 @@ class KuliahVaultController(
         container.addView(sectionHeader("Belajar & Pencarian Materi", "Cari di PDF, transkrip dosen, papan tulis, flashcard & bank rumus"))
         container.addView(space(10))
 
-        // Global Vault Search Box
         val searchCard = glassCard()
         val searchInput = EditText(activity).apply {
             hint = "Cari kata kunci di semua PDF, transkrip, & papan tulis..."
@@ -1388,7 +1626,6 @@ class KuliahVaultController(
         container.addView(searchCard, matchWrapBottom(14))
         if (searchQuery.trim().length >= 2) updateSearchHits(searchQuery)
 
-        // Vault Stats Row
         val counts = db.getVaultCourseCounts().values
         val totalPdf = counts.sumOf { it.pdf }
         val totalRec = counts.sumOf { it.recording }
@@ -1403,7 +1640,6 @@ class KuliahVaultController(
         container.addView(statRow)
         container.addView(space(14))
 
-        // Study Tools per Course
         container.addView(TextView(activity).apply {
             text = "Alat Belajar Cepat per Mata Kuliah"
             textSize = 15f
@@ -1438,8 +1674,11 @@ class KuliahVaultController(
             analysis.definitions.forEach { (term, desc) ->
                 cards.add("Apa yang dimaksud dengan $term?" to desc)
             }
+            analysis.formulaDetails.forEach { f ->
+                cards.add("Sebutkan ${f.label}" to "${f.expression}${if (f.variableNotes.isNotBlank()) "\n(${f.variableNotes})" else ""}")
+            }
             analysis.summary.forEachIndexed { idx, s ->
-                cards.add("Poin Ringkasan #${idx + 1} (${p.title})" to s)
+                cards.add("Intisari #${idx + 1} (${p.title})" to s)
             }
         }
         if (cards.isEmpty()) {
@@ -1459,7 +1698,7 @@ class KuliahVaultController(
             setTextColor(Color.parseColor("#4F46E5"))
         }
         val cardContent = TextView(activity).apply {
-            textSize = 16f
+            textSize = 15f
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
             setPadding(dp(16), dp(28), dp(16), dp(28))
@@ -1526,7 +1765,11 @@ class KuliahVaultController(
                 val fCard = LinearLayout(activity).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(dp(12), dp(10), dp(12), dp(10))
-                    setBackgroundColor(Color.parseColor("#FEF3C7"))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#FFFBEB"))
+                        setStroke(dp(1), Color.parseColor("#FCD34D"))
+                        cornerRadius = dp(12).toFloat()
+                    }
                 }
                 fCard.addView(TextView(activity).apply {
                     text = f.title
@@ -1538,6 +1781,7 @@ class KuliahVaultController(
                     text = f.expression
                     typeface = Typeface.MONOSPACE
                     textSize = 14f
+                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
                     setTextColor(Color.parseColor("#0F172A"))
                     setPadding(0, dp(4), 0, dp(4))
                 })
