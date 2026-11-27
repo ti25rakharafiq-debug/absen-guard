@@ -210,7 +210,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
         })
         titleCol.addView(TextView(this).apply {
-            text = "E-Learning UBP • Dynamic Island"
+            text = "E-Learning & SIPT UBP • Dynamic Island"
             textSize = 12f
             setTextColor(paletteSubtext())
         })
@@ -496,7 +496,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(makeSwitchRow("Pengingat Persiapan H-10 Menit", "pre_reminder_10m", true))
         card.addView(space(12))
 
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val rowTools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val testAlarm = Button(this).apply {
             text = "Tes Alarm"
             isAllCaps = false
@@ -532,19 +532,6 @@ class MainActivity : AppCompatActivity() {
             }
             LiquidGlassKit.attachLiquidTouch(this)
         }
-        val portal = Button(this).apply {
-            text = "E-Learning"
-            isAllCaps = false
-            textSize = 11f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteLightText())
-            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 16f)
-            setOnClickListener {
-                val nextSchedule = AlarmScheduler.getNextUpcomingSchedule(this@MainActivity)?.first
-                openCoursePortal(nextSchedule)
-            }
-            LiquidGlassKit.attachLiquidTouch(this)
-        }
         val silent = Button(this).apply {
             text = getSilentButtonLabel()
             isAllCaps = false
@@ -555,25 +542,86 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { toggleSilentMode(this) }
             LiquidGlassKit.attachLiquidTouch(this)
         }
-        val p1 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(3) }
-        val p2 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3); marginEnd = dp(3) }
-        val p3 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3); marginEnd = dp(3) }
-        val p4 = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(3) }
-        row.addView(testAlarm, p1)
-        row.addView(testIsland, p2)
-        row.addView(portal, p3)
-        row.addView(silent, p4)
-        card.addView(row)
+        val p1 = LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(4) }
+        val p2 = LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(4); marginEnd = dp(4) }
+        val p3 = LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(4) }
+        rowTools.addView(testAlarm, p1)
+        rowTools.addView(testIsland, p2)
+        rowTools.addView(silent, p3)
+        card.addView(rowTools)
+
+        card.addView(space(8))
+
+        val rowPortals = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val viaSiptBtn = Button(this).apply {
+            text = "Via SIPT"
+            isAllCaps = false
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#0284C7", "#99F8FAFC", 16f)
+            setOnClickListener { openSiptPortal() }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }
+        val directElearningBtn = Button(this).apply {
+            text = "E-Learning"
+            isAllCaps = false
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 16f)
+            setOnClickListener { openDirectElearning() }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }
+        val pSipt = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginEnd = dp(4) }
+        val pElearn = LinearLayout.LayoutParams(0, dp(40), 1f).apply { marginStart = dp(4) }
+        rowPortals.addView(viaSiptBtn, pSipt)
+        rowPortals.addView(directElearningBtn, pElearn)
+        card.addView(rowPortals)
+
         mainContent.addView(card)
         mainContent.addView(space(14))
+    }
+
+    private fun openSiptPortal() {
+        val siptUrl = db.getSetting("sipt_url", "https://sipt2.ubpkarawang.ac.id/apps")
+            .ifBlank { "https://sipt2.ubpkarawang.ac.id/apps" }
+        val intent = Intent(this, SiptPortalActivity::class.java).apply {
+            putExtra(SiptPortalActivity.EXTRA_COURSE_URL, siptUrl)
+            putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, "Portal SIPT UBP")
+            putExtra("extra_portal_mode", "SIPT")
+            putExtra("extra_portal_password", "ubpk2024")
+        }
+        startActivity(intent)
+    }
+
+    private fun openDirectElearning() {
+        val elearningUrl = db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php")
+            .ifBlank { "https://elearning.ubpkarawang.ac.id/login/index.php" }
+        val intent = Intent(this, SiptPortalActivity::class.java).apply {
+            putExtra(SiptPortalActivity.EXTRA_COURSE_URL, elearningUrl)
+            putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, "E-Learning UBP")
+            putExtra("extra_portal_mode", "ELEARNING")
+            putExtra("extra_portal_password", "Buana0000!")
+        }
+        startActivity(intent)
     }
 
     private fun openCoursePortal(schedule: CourseSchedule?) {
         val intent = Intent(this, SiptPortalActivity::class.java)
         if (schedule != null) {
+            val isSiptUrl = schedule.courseUrl.contains("sipt", ignoreCase = true)
             intent.putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, schedule.id)
             intent.putExtra(SiptPortalActivity.EXTRA_COURSE_URL, schedule.courseUrl)
             intent.putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, schedule.courseName)
+            intent.putExtra("extra_portal_mode", if (isSiptUrl) "SIPT" else "ELEARNING")
+            intent.putExtra("extra_portal_password", if (isSiptUrl) "ubpk2024" else "Buana0000!")
+        } else {
+            val elearningUrl = db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php")
+            intent.putExtra(SiptPortalActivity.EXTRA_COURSE_URL, elearningUrl)
+            intent.putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, "E-Learning UBP")
+            intent.putExtra("extra_portal_mode", "ELEARNING")
+            intent.putExtra("extra_portal_password", "Buana0000!")
         }
         startActivity(intent)
     }
@@ -1458,6 +1506,16 @@ class MainActivity : AppCompatActivity() {
             setText(db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php"))
         }
 
+        val siptUrlLabel = TextView(this).apply {
+            text = "URL Portal SIPT (Cadangan / SSO)"
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+        }
+        val siptUrlInput = EditText(this).apply {
+            setText(db.getSetting("sipt_url", "https://sipt2.ubpkarawang.ac.id/apps"))
+        }
+
         val currentOffsetY = (db.getSetting("island_offset_y", "0").toIntOrNull() ?: 0).coerceIn(-15, 40)
         val offsetYLabel = TextView(this).apply {
             text = "Posisi Kamera (Atas / Bawah): ${currentOffsetY}dp"
@@ -1559,6 +1617,9 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(urlLabel)
         container.addView(urlInput)
+        container.addView(space(8))
+        container.addView(siptUrlLabel)
+        container.addView(siptUrlInput)
         container.addView(space(10))
         container.addView(offsetYLabel)
         container.addView(offsetYSeek)
@@ -1583,6 +1644,8 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Simpan") { _, _ ->
                 db.setSetting("portal_url", urlInput.text.toString().trim()
                     .ifEmpty { "https://elearning.ubpkarawang.ac.id/login/index.php" })
+                db.setSetting("sipt_url", siptUrlInput.text.toString().trim()
+                    .ifEmpty { "https://sipt2.ubpkarawang.ac.id/apps" })
                 db.setSetting("math_dismiss", if (mathSwitch.isChecked) "1" else "0")
                 db.setSetting("dark_mode", if (darkSwitch.isChecked) "1" else "0")
                 Toast.makeText(this, "Pengaturan disimpan", Toast.LENGTH_SHORT).show()
