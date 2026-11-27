@@ -57,7 +57,7 @@ class NextClassWidgetProvider : AppWidgetProvider() {
                 val attended = db.isAttendedToday(s.id)
                 views.setTextViewText(R.id.widget_course_name, s.courseName)
                 views.setTextViewText(R.id.widget_time_room, timeRoom)
-                views.setTextViewText(R.id.widget_status_badge, if (attended) "Sudah Absen ✓" else "Siap Dering (${s.classMode})")
+                views.setTextViewText(R.id.widget_status_badge, if (attended) "Hadir ✓" else s.classMode)
             }
 
             val openIntent = Intent(context, MainActivity::class.java)
@@ -68,7 +68,22 @@ class NextClassWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             views.setOnClickPendingIntent(R.id.widget_root, pi)
+
             if (next != null) {
+                val courseIntent = Intent(context, SiptPortalActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, next.first.id)
+                    putExtra(SiptPortalActivity.EXTRA_COURSE_URL, next.first.courseUrl)
+                    putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, next.first.courseName)
+                }
+                val coursePi = PendingIntent.getActivity(
+                    context,
+                    widgetId + 20000,
+                    courseIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                views.setOnClickPendingIntent(R.id.widget_btn_open_course, coursePi)
+
                 val attendIntent = Intent(context, NotificationActionReceiver::class.java).apply {
                     action = NotificationActionReceiver.ACTION_MARK_ATTENDED
                     putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, next.first.id)
