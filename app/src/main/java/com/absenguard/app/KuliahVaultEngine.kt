@@ -5,16 +5,17 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
-import com.google.android.gms.tasks.Tasks
+import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
@@ -29,804 +30,1377 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
-import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
 
 data class VaultCourse(
     val key: String,
     val base: String,
-    val name: String,
-    val variant: String? = null
+    val name: String
 )
 
 data class ClassificationResult(
     val suggestedCourseKey: String,
-    val suggestedBase: String,
+    val suggestedBase: String?,
     val label: String,
     val share: Double,
-    val confident: Boolean,
     val matchedKeywords: List<String>
 )
 
 data class PdfExtractionResult(
     val ok: Boolean,
-    val pageCount: Int,
-    val text: String,
-    val scanned: Boolean,
-    val error: String = ""
+    val text: String = "",
+    val pageCount: Int = 0,
+    val scanned: Boolean = false,
+    val error: String = "",
+    val prebuiltAnalysis: TextAnalysisResult? = null
 )
 
-data class StudySection(
+data class SectionBlock(
     val heading: String,
     val bullets: List<String>,
-    val body: String
+    val body: String,
+    val page: Int = 1
 )
 
 data class FormulaItem(
     val label: String,
     val expression: String,
-    val variableNotes: String = ""
+    val variableNotes: String
+)
+
+data class ExtractedTable(
+    val title: String,
+    val page: Int,
+    val headers: List<String>,
+    val rows: List<List<String>>
+)
+
+data class ExtractedFigure(
+    val caption: String,
+    val page: Int,
+    val imagePath: String
+)
+
+data class ProceduralDiagram(
+    val title: String,
+    val kind: String, // "flow", "bep", "eoq", "normal"
+    val nodes: List<String>
 )
 
 data class TextAnalysisResult(
     val summary: List<String>,
+    val sections: List<SectionBlock>,
     val definitions: List<Pair<String, String>>,
     val formulas: List<Pair<String, String>>,
     val formulaDetails: List<FormulaItem> = emptyList(),
-    val sections: List<StudySection> = emptyList()
+    val tables: List<ExtractedTable> = emptyList(),
+    val figures: List<ExtractedFigure> = emptyList(),
+    val diagrams: List<ProceduralDiagram> = emptyList(),
+    val schemaVersion: Int = 2
+)
+
+private data class GlyphToken(
+    val ch: String,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val fontSize: Float,
+    val isBold: Boolean
+)
+
+private data class TextSpan(
+    val text: String,
+    val x: Float,
+    val endX: Float,
+    val y: Float,
+    val height: Float,
+    val fontSize: Float,
+    val isBold: Boolean
+)
+
+private data class SpatialLine(
+    val page: Int,
+    val y: Float,
+    val height: Float,
+    val fontSize: Float,
+    val isBold: Boolean,
+    val spans: List<TextSpan>
+) {
+    val fullText: String get() = spans.joinToString(" ") { it.text }.trim()
+    val minX: Float get() = spans.minOfOrNull { it.x } ?: 0f
+}
+
+private data class PageLayoutData(
+    val pageNum: Int,
+    val widthPt: Float,
+    val heightPt: Float,
+    val lines: List<SpatialLine>
 )
 
 object KuliahVaultEngine {
 
-    private var pdfBoxInitialized = false
-
-    val VAULT_COURSES = listOf(
-        VaultCourse("pemasaran", "pemasaran", "Pemasaran Industri"),
-        VaultCourse("bahan", "bahan", "Ilmu Bahan dan Kimia Lingkungan"),
-        VaultCourse("probabilitas", "probabilitas", "Teori Probabilitas"),
-        VaultCourse("biaya", "biaya", "Analisis dan Estimasi Biaya"),
-        VaultCourse("algo_t", "algo", "Algoritma & Pemrograman Komputer (T)", "T"),
-        VaultCourse("algo_p", "algo", "Algoritma & Pemrograman Komputer (P)", "P"),
-        VaultCourse("or1", "or1", "Operasional Riset 1"),
-        VaultCourse("apk_t", "apk", "Analisis dan Perancangan Kerja (T)", "T"),
-        VaultCourse("apk_p", "apk", "Analisis Perancangan Kerja (P)", "P"),
-        VaultCourse("jatidiri", "jatidiri", "Jatidiri Bangsa"),
-        VaultCourse("umum", "umum", "Umum (Belum Terklasifikasi)")
+    val VAULT_COURSES: List<VaultCourse> = listOf(
+        VaultCourse("pemasaran-industri", "Pemasaran Industri", "Pemasaran Industri"),
+        VaultCourse("ilmu-bahan-kimia-lingkungan", "Ilmu Bahan dan Kimia Lingkungan", "Ilmu Bahan dan Kimia Lingkungan"),
+        VaultCourse("teori-probabilitas", "Teori Probabilitas", "Teori Probabilitas"),
+        VaultCourse("analisis-estimasi-biaya", "Analisis dan Estimasi Biaya", "Analisis dan Estimasi Biaya"),
+        VaultCourse("algoritma-pemrograman-komputer", "Algoritma & Pemrograman Komputer", "Algoritma & Pemrograman Komputer"),
+        VaultCourse("operasional-riset-1", "Operasional Riset 1", "Operasional Riset 1"),
+        VaultCourse("analisis-perancangan-kerja", "Analisis dan Perancangan Kerja", "Analisis dan Perancangan Kerja"),
+        VaultCourse("jatidiri-bangsa", "Jatidiri Bangsa", "Jatidiri Bangsa"),
+        VaultCourse("umum", "Umum", "Umum / Belum Terkategori")
     )
 
-    val BASE_LABELS = mapOf(
-        "pemasaran" to "Pemasaran Industri",
-        "bahan" to "Ilmu Bahan dan Kimia Lingkungan",
-        "probabilitas" to "Teori Probabilitas",
-        "biaya" to "Analisis dan Estimasi Biaya",
-        "algo" to "Algoritma & Pemrograman Komputer",
-        "or1" to "Operasional Riset 1",
-        "apk" to "Analisis dan Perancangan Kerja",
-        "jatidiri" to "Jatidiri Bangsa",
-        "umum" to "Umum (Belum Terklasifikasi)"
-    )
-
-    val COURSE_KEYWORDS: Map<String, List<Pair<String, Int>>> = mapOf(
-        "pemasaran" to listOf(
-            "pemasaran" to 4, "marketing" to 4, "bauran pemasaran" to 5, "marketing mix" to 5,
-            "segmentasi" to 4, "targeting" to 3, "positioning" to 3, "perilaku konsumen" to 5,
-            "konsumen" to 2, "pelanggan" to 2, "merek" to 3, "brand" to 3, "promosi" to 3,
-            "saluran distribusi" to 4, "distribusi" to 2, "pasar sasaran" to 4, "pangsa pasar" to 4,
-            "riset pemasaran" to 5, "strategi pemasaran" to 5, "kepuasan pelanggan" to 4,
-            "loyalitas" to 3, "siklus hidup produk" to 4, "diferensiasi" to 3, "kompetitor" to 2,
-            "pesaing" to 2, "periklanan" to 3, "iklan" to 2, "penjualan" to 2, "b2b" to 3,
-            "b2c" to 3, "penetapan harga" to 4, "harga jual" to 2, "swot" to 2,
-            "pemasaran industri" to 6, "pasar industri" to 4
+    val COURSE_KEYWORDS: Map<String, List<Pair<String, Double>>> = mapOf(
+        "Pemasaran Industri" to listOf(
+            "pemasaran" to 2.2, "industri" to 1.2, "segmentasi" to 2.6, "targeting" to 2.4,
+            "positioning" to 2.4, "b2b" to 3.0, "konsumen" to 1.6, "pelanggan" to 1.6,
+            "produk" to 1.3, "harga" to 1.2, "distribusi" to 1.8, "promosi" to 1.6,
+            "marketing mix" to 2.8, "bauran pemasaran" to 2.8, "pasar" to 1.4, "merek" to 1.8,
+            "brand" to 1.7, "penjualan" to 1.5, "permintaan" to 1.4, "kompetitor" to 1.8,
+            "swot" to 2.2, "nilai pelanggan" to 2.4, "rantai pasok" to 1.8
         ),
-        "bahan" to listOf(
-            "ilmu bahan" to 6, "material" to 3, "logam" to 4, "polimer" to 4, "keramik" to 4,
-            "komposit" to 4, "baja" to 3, "paduan" to 4, "alloy" to 3, "struktur kristal" to 5,
-            "tegangan" to 2, "regangan" to 3, "kekuatan tarik" to 5, "kekerasan" to 4,
-            "korosi" to 4, "perlakuan panas" to 5, "diagram fasa" to 5, "ikatan atom" to 4,
-            "kimia lingkungan" to 6, "limbah" to 4, "pencemaran" to 4, "polusi" to 4,
-            "titrasi" to 4, "ekosistem" to 3, "air limbah" to 5, "bod" to 3, "cod" to 3,
-            "amdal" to 4, "daur ulang" to 3, "emisi" to 3, "senyawa" to 3, "reaksi kimia" to 4,
-            "larutan" to 3, "atom" to 3, "molekul" to 3, "sifat mekanik" to 5, "sifat material" to 4
+        "Ilmu Bahan dan Kimia Lingkungan" to listOf(
+            "bahan" to 1.4, "material" to 2.0, "logam" to 2.4, "polimer" to 2.6,
+            "keramik" to 2.4, "komposit" to 2.6, "korosi" to 2.8, "kristal" to 2.3,
+            "atom" to 2.0, "ikatan kimia" to 2.8, "molekul" to 2.2, "reaksi kimia" to 2.5,
+            "limbah" to 2.6, "pencemaran" to 2.6, "lingkungan" to 2.0, "emisi" to 2.3,
+            "b3" to 2.8, "ph" to 1.8, "asam" to 1.8, "basa" to 1.8, "oksidasi" to 2.3,
+            "reduksi" to 2.2, "diagram fasa" to 3.0, "baja" to 2.2, "paduan" to 2.2,
+            "perlakuan panas" to 2.6, "toksik" to 2.4, "bod" to 2.5, "cod" to 2.5, "amdal" to 2.8
         ),
-        "probabilitas" to listOf(
-            "probabilitas" to 6, "peluang" to 5, "ruang sampel" to 6, "kejadian" to 3,
-            "variabel acak" to 6, "distribusi" to 3, "binomial" to 5, "poisson" to 5,
-            "distribusi normal" to 5, "eksponensial" to 3, "nilai harapan" to 5, "ekspektasi" to 3,
-            "varians" to 4, "simpangan baku" to 3, "bersyarat" to 4, "teorema bayes" to 6,
-            "bayes" to 4, "kombinasi" to 2, "permutasi" to 3, "fungsi kepadatan" to 5,
-            "fungsi distribusi kumulatif" to 5, "fungsi pembangkit momen" to 5, "saling bebas" to 4,
-            "saling lepas" to 4, "distribusi gabungan" to 5, "kovarians" to 4,
-            "hukum bilangan besar" to 5, "limit sentral" to 5, "geometrik" to 3,
-            "hipergeometrik" to 5, "bernoulli" to 4, "distribusi diskrit" to 5, "distribusi kontinu" to 5
+        "Teori Probabilitas" to listOf(
+            "probabilitas" to 3.0, "peluang" to 2.6, "kejadian" to 2.0, "ruang sampel" to 3.0,
+            "variabel acak" to 3.0, "distribusi" to 2.2, "binomial" to 2.8, "poisson" to 3.0,
+            "normal" to 1.8, "eksponensial" to 2.5, "bayes" to 3.0, "bersyarat" to 2.4,
+            "ekspektasi" to 2.6, "variansi" to 2.6, "deviasi standar" to 2.5, "permutasi" to 2.7,
+            "kombinasi" to 2.5, "faktorial" to 2.4, "stokastik" to 2.8, "fungsi kepadatan" to 2.9,
+            "pdf" to 1.4, "cdf" to 2.6, "bernoulli" to 2.9, "hipotesis" to 2.0
         ),
-        "biaya" to listOf(
-            "estimasi biaya" to 6, "analisis biaya" to 6, "biaya" to 3, "harga pokok" to 5,
-            "hpp" to 4, "biaya tetap" to 5, "biaya variabel" to 5, "overhead" to 4, "bop" to 3,
-            "break even" to 5, "titik impas" to 5, "biaya langsung" to 5, "biaya tidak langsung" to 5,
-            "depresiasi" to 4, "nilai waktu uang" to 5, "suku bunga" to 3, "bunga majemuk" to 4,
-            "anggaran" to 3, "kurva belajar" to 4, "learning curve" to 4, "cost estimating" to 5,
-            "estimasi parametrik" to 5, "indeks biaya" to 5, "job order" to 4, "inflasi" to 3,
-            "npv" to 3, "irr" to 3, "payback" to 3, "biaya tenaga kerja" to 4,
-            "biaya bahan baku" to 4, "life cycle cost" to 5, "biaya siklus hidup" to 5, "rab" to 3
+        "Analisis dan Estimasi Biaya" to listOf(
+            "biaya" to 2.2, "estimasi biaya" to 3.2, "harga pokok" to 2.8, "hpp" to 3.0,
+            "overhead" to 2.8, "biaya tetap" to 2.7, "biaya variabel" to 2.7, "fixed cost" to 2.7,
+            "variable cost" to 2.7, "break even" to 3.0, "bep" to 3.0, "titik impas" to 3.0,
+            "depresiasi" to 2.8, "penyusutan" to 2.6, "investasi" to 2.0, "npv" to 2.9,
+            "irr" to 2.9, "payback" to 2.7, "anggaran" to 2.2, "tenaga kerja langsung" to 2.7,
+            "bahan baku" to 2.2, "margin" to 2.0, "laba" to 1.8, "akuntansi biaya" to 2.8,
+            "activity based costing" to 3.0, "abc" to 1.6
         ),
-        "algo" to listOf(
-            "algoritma" to 6, "pemrograman" to 5, "program" to 2, "variabel" to 2, "tipe data" to 5,
-            "percabangan" to 5, "perulangan" to 5, "array" to 4, "string" to 3, "pointer" to 4,
-            "rekursif" to 4, "rekursi" to 4, "flowchart" to 4, "diagram alir" to 4,
-            "pseudocode" to 5, "python" to 5, "c++" to 5, "java" to 3, "kompilasi" to 4,
-            "compiler" to 4, "if else" to 4, "for loop" to 4, "struktur data" to 5,
-            "sorting" to 4, "searching" to 4, "debug" to 4, "sintaks" to 4,
-            "praktikum pemrograman" to 6, "kode program" to 5, "source code" to 4, "jupyter" to 3
+        "Algoritma & Pemrograman Komputer" to listOf(
+            "algoritma" to 3.0, "pemrograman" to 2.8, "program" to 2.0, "kode" to 1.8,
+            "variabel" to 1.8, "tipe data" to 2.6, "integer" to 2.5, "float" to 2.4,
+            "string" to 2.4, "boolean" to 2.6, "array" to 2.7, "perulangan" to 2.6,
+            "loop" to 2.5, "for" to 1.4, "while" to 2.0, "percabangan" to 2.6,
+            "if else" to 2.6, "fungsi" to 1.8, "prosedur" to 2.2, "rekursi" to 2.8,
+            "flowchart" to 2.8, "pseudocode" to 3.0, "python" to 2.8, "java" to 2.4,
+            "c++" to 2.7, "kompilasi" to 2.4, "debugging" to 2.6, "struktur data" to 2.7
         ),
-        "or1" to listOf(
-            "riset operasi" to 6, "operasional riset" to 6, "program linier" to 6,
-            "program linear" to 6, "linear programming" to 6, "simpleks" to 6,
-            "metode simpleks" to 6, "metode grafik" to 4, "fungsi tujuan" to 5,
-            "fungsi kendala" to 4, "solusi optimal" to 5, "dualitas" to 5,
-            "analisis sensitivitas" to 4, "transportasi" to 4, "penugasan" to 4,
-            "vogel" to 5, "northwest corner" to 5, "stepping stone" to 5,
-            "variabel keputusan" to 5, "fungsi objektif" to 5, "daerah layak" to 5,
-            "variabel basis" to 5, "big m" to 4, "dua fase" to 4, "shadow price" to 4,
-            "harga bayangan" to 4, "optimasi" to 3, "integer programming" to 4,
-            "maksimasi" to 4, "minimasi" to 4, "metode hungarian" to 5
+        "Operasional Riset 1" to listOf(
+            "operasional riset" to 3.2, "riset operasi" to 3.2, "pemrograman linier" to 3.0,
+            "linear programming" to 3.0, "simpleks" to 3.2, "simplex" to 3.2, "fungsi tujuan" to 2.9,
+            "kendala" to 2.5, "constraint" to 2.6, "maksimasi" to 2.7, "minimasi" to 2.7,
+            "dualitas" to 2.9, "sensitivitas" to 2.6, "transportasi" to 2.6, "penugasan" to 2.6,
+            "assignment" to 2.4, "northwest corner" to 3.0, "stepping stone" to 3.0,
+            "vam" to 2.8, "big m" to 2.9, "two phase" to 2.8, "optimal" to 2.0,
+            "solusi layak" to 2.8, "variabel slack" to 3.0, "shadow price" to 3.0
         ),
-        "apk" to listOf(
-            "studi waktu" to 5, "time study" to 5, "studi gerak" to 5, "work sampling" to 5,
-            "sampling kerja" to 5, "peta kerja" to 5, "peta proses operasi" to 6,
-            "flow process chart" to 5, "therblig" to 6, "waktu baku" to 6, "waktu standar" to 6,
-            "waktu normal" to 5, "performance rating" to 5, "allowance" to 4, "kelonggaran" to 5,
-            "stopwatch" to 5, "mtm" to 4, "antropometri" to 6, "ergonomi" to 6, "beban kerja" to 5,
-            "analisis kerja" to 5, "metode kerja" to 5, "stasiun kerja" to 4, "tata cara kerja" to 5,
-            "biomekanika" to 5, "kelelahan" to 4, "lingkungan kerja" to 4, "pengukuran kerja" to 6,
-            "elemen kerja" to 5, "westinghouse" to 5, "perancangan kerja" to 6
+        "Analisis dan Perancangan Kerja" to listOf(
+            "perancangan kerja" to 3.2, "pengukuran kerja" to 3.0, "studi waktu" to 3.0,
+            "time study" to 3.0, "studi gerakan" to 3.0, "motion study" to 3.0, "ergonomi" to 3.0,
+            "antropometri" to 3.1, "peta proses" to 2.9, "opc" to 2.8, "fpc" to 2.8,
+            "peta tangan" to 2.9, "therblig" to 3.2, "waktu normal" to 3.0, "waktu baku" to 3.1,
+            "waktu siklus" to 3.0, "performance rating" to 3.0, "westinghouse" to 3.1,
+            "allowance" to 2.9, "kelonggaran" to 2.8, "work sampling" to 3.0, "kelelahan" to 2.3,
+            "stasiun kerja" to 2.7, "postur" to 2.4, "biomekanika" to 2.9, "beban kerja" to 2.7
         ),
-        "jatidiri" to listOf(
-            "pancasila" to 6, "jati diri" to 6, "jatidiri" to 6, "kewarganegaraan" to 5,
-            "uud 1945" to 6, "undang-undang dasar" to 5, "nasionalisme" to 5,
-            "wawasan nusantara" to 6, "bhinneka tunggal ika" to 6, "bhinneka" to 4,
-            "demokrasi" to 4, "hak asasi manusia" to 5, "identitas nasional" to 6,
-            "proklamasi" to 5, "konstitusi" to 5, "ketahanan nasional" to 6, "geopolitik" to 5,
-            "bela negara" to 6, "kebangsaan" to 5, "integrasi nasional" to 6,
-            "sumpah pemuda" to 6, "warga negara" to 4, "otonomi daerah" to 5,
-            "karakter bangsa" to 6, "patriotisme" to 5
+        "Jatidiri Bangsa" to listOf(
+            "jatidiri" to 3.2, "bangsa" to 2.2, "pancasila" to 3.2, "uud 1945" to 3.0,
+            "nkri" to 3.0, "bhinneka tunggal ika" to 3.1, "wawasan nusantara" to 3.1,
+            "ketahanan nasional" to 3.0, "karakter" to 2.0, "identitas nasional" to 3.0,
+            "nasionalisme" to 2.8, "patriotisme" to 2.8, "budaya" to 1.8, "kearifan lokal" to 2.7,
+            "karawang" to 2.4, "kebangsaan" to 2.6, "konstitusi" to 2.6, "ideologi" to 2.6,
+            "demokrasi" to 2.3, "hak asasi" to 2.3, "bela negara" to 2.9, "gotong royong" to 2.6
         )
     )
 
-    private val STOPWORDS_ID_EN = setOf(
-        "yang", "dan", "di", "ke", "dari", "pada", "dalam", "untuk", "dengan", "atau", "ini", "itu",
-        "adalah", "merupakan", "yaitu", "ialah", "sebagai", "oleh", "karena", "jika", "maka", "dapat",
-        "akan", "telah", "sudah", "belum", "tidak", "bukan", "sangat", "lebih", "paling", "antara",
-        "serta", "secara", "hal", "tersebut", "suatu", "satu", "dua", "tiga", "kita", "kami", "anda",
-        "the", "and", "of", "to", "in", "is", "are", "for", "with", "that", "this", "from", "by", "as"
+    private val FORMULA_VARIABLE_HINTS: Map<String, String> = mapOf(
+        "wb" to "Wb = Waktu Baku",
+        "wn" to "Wn = Waktu Normal",
+        "ws" to "Ws = Waktu Siklus",
+        "rf" to "RF = Performance Rating Factor",
+        "bep" to "BEP = Break-Even Point (Titik Impas)",
+        "fc" to "FC = Fixed Cost (Biaya Tetap)",
+        "vc" to "VC = Variable Cost (Biaya Variabel)",
+        "hpp" to "HPP = Harga Pokok Produksi",
+        "npv" to "NPV = Net Present Value",
+        "irr" to "IRR = Internal Rate of Return",
+        "eoq" to "EOQ = Economic Order Quantity",
+        "rop" to "ROP = Reorder Point",
+        "oee" to "OEE = Overall Equipment Effectiveness"
     )
-
-    private val BOILERPLATE_PATTERNS = listOf(
-        Regex("^(dosen|pengampu|penyusun|disusun oleh|oleh|nama|nim|kelas|prodi|program studi|fakultas|universitas|pertemuan|minggu ke|slide|halaman|page)\\s*[:\\-]", RegexOption.IGNORE_CASE),
-        Regex("^(universitas buana perjuangan|ubp karawang|teknik industri|daftar pustaka|referensi|terima kasih|sekian|thank you|q\\s*&\\s*a)\\b", RegexOption.IGNORE_CASE),
-        Regex("^\\d+\\s*(/|of|dari)?\\s*\\d*$")
-    )
-
-    private val MATH_UNICODE_CHARS = setOf(
-        '∑', '∫', '√', '≤', '≥', '≈', '≠', '±', '×', '÷', '∝', '∞', '∂', '∇',
-        'α', 'β', 'γ', 'δ', 'ε', 'θ', 'λ', 'μ', 'π', 'ρ', 'σ', 'τ', 'φ', 'ω', 'Δ', 'Σ', 'Ω', '∏'
-    )
-
-    private val IE_SYMBOL_REGEX = Regex(
-        "\\b(EOQ|ROP|OEE|NPV|IRR|BEP|HPP|BOP|TAC|TC|LT|SS|UCL|LCL|CL|Cp|Cpk|Pp|Ppk|Wb|Wn|Ws|Pr|All|MTBF|MTTR|WIP|P\\([A-Za-z0-9|,'\\s]+\\)|E\\([A-Za-z0-9,'\\s]+\\)|Var\\([A-Za-z0-9,'\\s]+\\)|f\\([xyz]\\))\\b"
-    )
-
-    fun ensurePdfBox(context: Context) {
-        if (!pdfBoxInitialized) {
-            PDFBoxResourceLoader.init(context.applicationContext)
-            pdfBoxInitialized = true
-        }
-    }
 
     fun courseByKey(key: String): VaultCourse =
         VAULT_COURSES.firstOrNull { it.key == key } ?: VAULT_COURSES.last()
 
     fun mapScheduleNameToCourseKey(courseName: String): String {
-        val lower = courseName.lowercase()
-        return when {
-            lower.contains("pemasaran") -> "pemasaran"
-            lower.contains("bahan") || lower.contains("kimia") -> "bahan"
-            lower.contains("probabilitas") -> "probabilitas"
-            lower.contains("biaya") -> "biaya"
-            lower.contains("algoritma") && lower.contains("(p)") -> "algo_p"
-            lower.contains("algoritma") -> "algo_t"
-            lower.contains("operasional") || lower.contains("riset") -> "or1"
-            lower.contains("perancangan kerja") && lower.contains("(p)") -> "apk_p"
-            lower.contains("perancangan kerja") -> "apk_t"
-            lower.contains("jatidiri") || lower.contains("jati diri") -> "jatidiri"
-            else -> "umum"
-        }
+        val clean = courseName
+            .replace(Regex("\\s*\\([TP]\\)\\s*$", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .lowercase()
+        return VAULT_COURSES.firstOrNull { it.base.lowercase() == clean }?.key ?: "umum"
     }
 
-    fun classifyText(text: String): ClassificationResult {
-        val lower = text.lowercase()
-        if (lower.length < 30) {
-            return ClassificationResult("umum", "umum", BASE_LABELS["umum"]!!, 0.0, false, emptyList())
+    fun classifyText(rawText: String): ClassificationResult {
+        val text = rawText.lowercase()
+        if (text.trim().length < 25) {
+            return ClassificationResult("umum", null, "Umum (Teks terlalu singkat)", 0.0, emptyList())
         }
-        val scores = mutableListOf<Triple<String, Int, List<String>>>()
-        var totalScore = 0
-        for ((base, keywords) in COURSE_KEYWORDS) {
-            var score = 0
-            val hits = mutableListOf<String>()
+
+        val scores = mutableMapOf<String, Double>()
+        val matchedMap = mutableMapOf<String, MutableList<String>>()
+        for ((courseBase, keywords) in COURSE_KEYWORDS) {
+            var score = 0.0
+            val matched = mutableListOf<String>()
             for ((kw, weight) in keywords) {
-                var idx = lower.indexOf(kw)
-                var count = 0
-                while (idx >= 0 && count < 10) {
-                    count++
-                    idx = lower.indexOf(kw, idx + kw.length)
-                }
+                val pattern = Regex("(?<![a-z0-9])${Regex.escape(kw)}(?![a-z0-9])")
+                val count = pattern.findAll(text).count()
                 if (count > 0) {
-                    score += weight * count
-                    hits.add(kw)
+                    score += weight * (1.0 + kotlin.math.ln(count.toDouble()).coerceAtMost(2.2))
+                    if (matched.size < 6) matched.add(kw)
                 }
             }
-            totalScore += score
-            scores.add(Triple(base, score, hits))
+            scores[courseBase] = score
+            matchedMap[courseBase] = matched
         }
-        scores.sortByDescending { it.second }
-        val top = scores.firstOrNull()
-        if (top == null || top.second < 10 || totalScore == 0) {
-            return ClassificationResult("umum", "umum", BASE_LABELS["umum"]!!, 0.0, false, emptyList())
+
+        val ranked = scores.entries.sortedByDescending { it.value }
+        val top = ranked.firstOrNull()
+        val total = ranked.sumOf { it.value }
+        if (top == null || top.value < 4.5 || total <= 0.0) {
+            return ClassificationResult("umum", null, "Umum (Skor kata kunci rendah)", 0.0, emptyList())
         }
-        val share = top.second.toDouble() / totalScore.toDouble()
-        val confident = share >= 0.34
-        val base = if (confident) top.first else "umum"
-        val courseKey = if (!confident) "umum" else VAULT_COURSES.firstOrNull { it.base == base }?.key ?: "umum"
-        return ClassificationResult(
-            suggestedCourseKey = courseKey,
-            suggestedBase = base,
-            label = BASE_LABELS[base] ?: base,
-            share = share,
-            confident = confident,
-            matchedKeywords = top.third.take(5)
-        )
+
+        val share = top.value / total
+        val matched = matchedMap[top.key].orEmpty()
+        val confident = top.value >= 7.0 && share >= 0.34
+        return if (confident) {
+            val key = VAULT_COURSES.firstOrNull { it.base == top.key }?.key ?: "umum"
+            ClassificationResult(key, top.key, top.key, share, matched)
+        } else {
+            ClassificationResult("umum", top.key, "Umum (Saran: ${top.key})", share, matched)
+        }
     }
 
-    // ==================== 1. LAYOUT-AWARE PDF EXTRACTION ====================
+    // ==================== NASA-GRADE SPATIAL PDF EXTRACTOR ====================
 
-    private data class StyledLine(
-        val text: String,
-        val fontSize: Float,
-        val isBold: Boolean,
-        val page: Int,
-        val yNorm: Float
-    )
+    fun extractPdfInfo(context: Context, file: File): PdfExtractionResult {
+        return try {
+            PDFBoxResourceLoader.init(context.applicationContext)
+            var pageCount = 0
+            val pageLayouts = mutableListOf<PageLayoutData>()
 
-    private class LayoutPdfStripper : PDFTextStripper() {
-        val capturedLines = mutableListOf<StyledLine>()
-        private var currentPageHeight = 842f
+            PDDocument.load(file).use { doc ->
+                if (doc.isEncrypted) {
+                    return PdfExtractionResult(ok = false, error = "PDF terkunci password.")
+                }
+                pageCount = doc.numberOfPages
+                for (p in 1..pageCount) {
+                    val extractor = SpatialPageExtractor(p)
+                    extractor.startPage = p
+                    extractor.endPage = p
+                    extractor.getText(doc)
+                    pageLayouts.add(extractor.buildPageLayout())
+                }
+            }
+
+            val totalChars = pageLayouts.sumOf { pl -> pl.lines.sumOf { it.fullText.length } }
+            val tables = reconstructTablesFromLayouts(pageLayouts)
+            val figures = extractFiguresFromPdf(context, file, pageLayouts)
+
+            if (totalChars >= 80) {
+                val structured = buildStructuredAnalysisFromLayouts(pageLayouts, tables, figures)
+                val fullCleanText = pageLayouts.joinToString("\n\n") { pl ->
+                    "--- Halaman ${pl.pageNum} ---\n" + pl.lines.joinToString("\n") { it.fullText }
+                }
+                return PdfExtractionResult(
+                    ok = true,
+                    text = fullCleanText,
+                    pageCount = pageCount,
+                    scanned = false,
+                    prebuiltAnalysis = structured
+                )
+            }
+
+            // Fallback OCR untuk PDF hasil scan (gambar tanpa layer teks)
+            val ocrBuilder = StringBuilder()
+            val ocrFigures = mutableListOf<ExtractedFigure>()
+            val figDir = File(context.filesDir, "kuliahvault/figures").apply { mkdirs() }
+            val stamp = System.currentTimeMillis()
+
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            val maxPages = renderer.pageCount.coerceAtMost(20)
+            for (i in 0 until maxPages) {
+                val page = renderer.openPage(i)
+                val scale = 2.0f
+                val bmp = Bitmap.createBitmap(
+                    (page.width * scale).toInt(),
+                    (page.height * scale).toInt(),
+                    Bitmap.Config.ARGB_8888
+                )
+                bmp.eraseColor(Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+
+                val pageText = recognizeBitmapSync(bmp)
+                if (pageText.isNotBlank()) {
+                    ocrBuilder.append("\n--- Halaman ${i + 1} ---\n").append(pageText).append("\n")
+                }
+
+                // Simpan halaman scan sebagai visual halaman agar tetap bisa dilihat
+                if (i < 8) {
+                    val outImg = File(figDir, "scan_${stamp}_p${i + 1}.png")
+                    FileOutputStream(outImg).use { fos -> bmp.compress(Bitmap.CompressFormat.PNG, 88, fos) }
+                    ocrFigures.add(ExtractedFigure("Halaman Scan #${i + 1}", i + 1, outImg.absolutePath))
+                }
+                bmp.recycle()
+            }
+            renderer.close()
+            pfd.close()
+
+            val finalText = ocrBuilder.toString().trim()
+            if (finalText.length < 20) {
+                PdfExtractionResult(ok = false, pageCount = pageCount, error = "PDF kosong atau tulisan tidak terbaca.")
+            } else {
+                val baseAnalysis = analyzeText(finalText).copy(figures = ocrFigures)
+                PdfExtractionResult(
+                    ok = true,
+                    text = finalText,
+                    pageCount = pageCount,
+                    scanned = true,
+                    prebuiltAnalysis = baseAnalysis
+                )
+            }
+        } catch (e: Exception) {
+            PdfExtractionResult(ok = false, error = "Gagal memproses PDF: ${e.message}")
+        }
+    }
+
+    private class SpatialPageExtractor(private val pageNum: Int) : PDFTextStripper() {
+        private val tokens = mutableListOf<GlyphToken>()
+        private var pageW = 595f
+        private var pageH = 842f
 
         init {
             sortByPosition = true
         }
 
-        override fun startPage(page: com.tom_roush.pdfbox.pdmodel.PDPage) {
-            super.startPage(page)
-            currentPageHeight = page.mediaBox?.height?.takeIf { it > 0f } ?: 842f
+        override fun writeString(text: String, textPositions: List<TextPosition>) {
+            for (tp in textPositions) {
+                val ch = tp.unicode ?: continue
+                if (ch.isEmpty() || ch[0].code < 32) continue
+                try {
+                    currentPage?.cropBox?.let { box ->
+                        if (box.width > 50f) pageW = box.width
+                        if (box.height > 50f) pageH = box.height
+                    }
+                } catch (_: Exception) {
+                }
+                val fontName = tp.font?.name.orEmpty().lowercase()
+                val isBold = fontName.contains("bold") || fontName.contains("black") || fontName.contains("heavy") || fontName.contains("demi")
+                val fs = if (tp.fontSizeInPt > 1f) tp.fontSizeInPt else tp.heightDir.coerceAtLeast(8f)
+                tokens.add(
+                    GlyphToken(
+                        ch = ch,
+                        x = tp.xDirAdj,
+                        y = tp.yDirAdj,
+                        width = tp.widthDirAdj.coerceAtLeast(1f),
+                        height = tp.heightDir.coerceAtLeast(6f),
+                        fontSize = fs,
+                        isBold = isBold
+                    )
+                )
+            }
         }
 
-        override fun writeString(text: String, textPositions: MutableList<TextPosition>) {
-            val cleaned = text.trim()
-            if (cleaned.isEmpty() || textPositions.isEmpty()) return
+        fun buildPageLayout(): PageLayoutData {
+            if (tokens.isEmpty()) return PageLayoutData(pageNum, pageW, pageH, emptyList())
 
-            var sumSize = 0f
-            var boldChars = 0
-            var minY = Float.MAX_VALUE
-            val sb = StringBuilder()
-            var prevEndX = -1f
+            val sortedByY = tokens.sortedWith(compareBy({ it.y }, { it.x }))
+            val rawRows = mutableListOf<MutableList<GlyphToken>>()
 
-            for (pos in textPositions) {
-                val sz = pos.fontSizeInPt.takeIf { it in 4f..96f } ?: pos.heightDir.takeIf { it in 4f..96f } ?: 11f
-                sumSize += sz
-                val fname = pos.font?.name?.lowercase().orEmpty()
-                if (fname.contains("bold") || fname.contains("black") || fname.contains("heavy") || fname.contains("demi")) {
-                    boldChars++
-                }
-                if (pos.yDirAdj < minY) minY = pos.yDirAdj
-
-                val curX = pos.xDirAdj
-                val spaceW = pos.widthOfSpace.takeIf { it > 0.5f } ?: (sz * 0.28f)
-                if (prevEndX > 0f) {
-                    val gap = curX - prevEndX
-                    if (gap > spaceW * 3.2f) {
-                        sb.append("  |  ")
-                    } else if (gap > spaceW * 0.48f && sb.isNotEmpty() && sb.last() != ' ') {
-                        sb.append(' ')
+            for (tok in sortedByY) {
+                val lastRow = rawRows.lastOrNull()
+                if (lastRow == null) {
+                    rawRows.add(mutableListOf(tok))
+                } else {
+                    val refY = lastRow.first().y
+                    val tol = max(3.6f, lastRow.first().fontSize * 0.45f)
+                    if (abs(tok.y - refY) <= tol) {
+                        lastRow.add(tok)
+                    } else {
+                        rawRows.add(mutableListOf(tok))
                     }
                 }
-                sb.append(pos.unicode)
-                prevEndX = curX + pos.widthDirAdj
             }
 
-            val finalLine = sb.toString().replace(Regex("\\s{2,}"), " ").trim()
-            if (finalLine.isNotEmpty()) {
-                val avgSize = sumSize / textPositions.size
-                val isBold = boldChars >= (textPositions.size * 0.55f)
-                val yNorm = (minY / currentPageHeight).coerceIn(0f, 1f)
-                capturedLines.add(StyledLine(finalLine, avgSize, isBold, currentPageNo, yNorm))
-            }
-        }
-    }
+            val spatialLines = mutableListOf<SpatialLine>()
+            for (row in rawRows) {
+                val ordered = row.sortedBy { it.x }
+                val spans = mutableListOf<TextSpan>()
+                val sb = StringBuilder()
+                var spanStartX = ordered.first().x
+                var prevEndX = ordered.first().x
+                var spanY = ordered.first().y
+                var maxH = ordered.first().height
+                var maxFs = ordered.first().fontSize
+                var boldCount = 0
+                var charCount = 0
 
-    fun extractPdfInfo(context: Context, file: File): PdfExtractionResult {
-        return try {
-            ensurePdfBox(context)
-            var pageCount = 0
-            val rawLines = mutableListOf<StyledLine>()
+                for (i in ordered.indices) {
+                    val t = ordered[i]
+                    if (i == 0) {
+                        sb.append(t.ch)
+                        spanStartX = t.x
+                        prevEndX = t.x + t.width
+                        spanY = t.y
+                        maxH = t.height
+                        maxFs = t.fontSize
+                        if (t.isBold) boldCount++
+                        charCount++
+                    } else {
+                        val gap = t.x - prevEndX
+                        val colGapThreshold = max(13f, t.fontSize * 1.15f)
+                        val wordSpaceThreshold = max(1.8f, t.fontSize * 0.22f)
 
-            PDDocument.load(file).use { doc ->
-                pageCount = doc.numberOfPages
-                val maxPagesToParse = min(pageCount, 80)
-                val stripper = LayoutPdfStripper().apply {
-                    startPage = 1
-                    endPage = maxPagesToParse
-                }
-                stripper.getText(doc)
-                rawLines.addAll(stripper.capturedLines)
-            }
-
-            val reconstructed = reconstructLayoutText(rawLines, pageCount)
-            val alphaCount = reconstructed.count { it.isLetterOrDigit() }
-
-            // Fallback OCR otomatis jika PDF dosen berupa hasil scan gambar
-            if (alphaCount < 60 && pageCount > 0) {
-                val ocrText = extractScannedPdfViaOcr(file, min(pageCount, 12))
-                val ocrAlpha = ocrText.count { it.isLetterOrDigit() }
-                if (ocrAlpha > alphaCount) {
-                    return PdfExtractionResult(
-                        ok = true,
-                        pageCount = pageCount,
-                        text = ocrText,
-                        scanned = true
-                    )
-                }
-            }
-
-            PdfExtractionResult(
-                ok = true,
-                pageCount = pageCount,
-                text = reconstructed,
-                scanned = alphaCount < 40
-            )
-        } catch (e: Exception) {
-            PdfExtractionResult(
-                ok = false,
-                pageCount = 0,
-                text = "",
-                scanned = false,
-                error = e.message ?: "Gagal memproses dokumen PDF"
-            )
-        }
-    }
-
-    private fun extractScannedPdfViaOcr(file: File, maxPages: Int): String {
-        val sb = StringBuilder()
-        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        try {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                PdfRenderer(pfd).use { renderer ->
-                    val limit = min(renderer.pageCount, maxPages)
-                    for (i in 0 until limit) {
-                        renderer.openPage(i).use { page ->
-                            val targetW = 1500
-                            val scale = targetW.toFloat() / max(page.width, 1).toFloat()
-                            val targetH = (page.height * scale).roundToInt().coerceAtLeast(100)
-                            val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                            bmp.eraseColor(Color.WHITE)
-                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-
-                            val normalized = normalizeIlluminationBitmap(bmp)
-                            val image = InputImage.fromBitmap(normalized, 0)
-                            val visionText = Tasks.await(recognizer.process(image))
-                            val pageText = formatSortedVisionText(visionText)
-                            if (pageText.isNotBlank()) {
-                                sb.append("[BAB] Halaman ").append(i + 1).append("\n")
-                                sb.append(pageText).append("\n\n")
+                        if (gap >= colGapThreshold && sb.toString().trim().isNotEmpty()) {
+                            spans.add(
+                                TextSpan(
+                                    text = sb.toString().trim(),
+                                    x = spanStartX,
+                                    endX = prevEndX,
+                                    y = spanY,
+                                    height = maxH,
+                                    fontSize = maxFs,
+                                    isBold = boldCount > charCount / 2
+                                )
+                            )
+                            sb.clear()
+                            sb.append(t.ch)
+                            spanStartX = t.x
+                            prevEndX = t.x + t.width
+                            spanY = t.y
+                            maxH = t.height
+                            maxFs = t.fontSize
+                            boldCount = if (t.isBold) 1 else 0
+                            charCount = 1
+                        } else {
+                            if (gap >= wordSpaceThreshold && sb.isNotEmpty() && sb.last() != ' ') {
+                                sb.append(' ')
                             }
-                            if (normalized !== bmp) normalized.recycle()
-                            bmp.recycle()
+                            sb.append(t.ch)
+                            prevEndX = max(prevEndX, t.x + t.width)
+                            maxH = max(maxH, t.height)
+                            maxFs = max(maxFs, t.fontSize)
+                            if (t.isBold) boldCount++
+                            charCount++
                         }
                     }
                 }
+                if (sb.toString().trim().isNotEmpty()) {
+                    spans.add(
+                        TextSpan(
+                            text = sb.toString().trim(),
+                            x = spanStartX,
+                            endX = prevEndX,
+                            y = spanY,
+                            height = maxH,
+                            fontSize = maxFs,
+                            isBold = boldCount > charCount / 2
+                        )
+                    )
+                }
+
+                if (spans.isNotEmpty()) {
+                    val lineY = spans.minOf { it.y }
+                    val fullStr = spans.joinToString(" ") { it.text }.trim()
+                    // Abaikan header/footer running halaman
+                    val isMarginNoise = (lineY < pageH * 0.055f || lineY > pageH * 0.945f) && fullStr.length < 55
+                    if (!isMarginNoise) {
+                        spatialLines.add(
+                            SpatialLine(
+                                page = pageNum,
+                                y = lineY,
+                                height = spans.maxOf { it.height },
+                                fontSize = spans.maxOf { it.fontSize },
+                                isBold = spans.any { it.isBold },
+                                spans = spans
+                            )
+                        )
+                    }
+                }
             }
-        } catch (_: Exception) {
-        } finally {
-            recognizer.close()
+            return PageLayoutData(pageNum, pageW, pageH, spatialLines)
         }
-        return sb.toString().trim()
     }
 
-    private fun reconstructLayoutText(lines: List<StyledLine>, pageCount: Int): String {
-        if (lines.isEmpty()) return ""
+    /**
+     * Rekonstruksi Tabel 2D sejati dari koordinat X-Y setiap span di halaman PDF.
+     */
+    private fun reconstructTablesFromLayouts(layouts: List<PageLayoutData>): List<ExtractedTable> {
+        val allTables = mutableListOf<ExtractedTable>()
+        var tableCounter = 1
 
-        // 1. Hitung frekuensi teks header/footer berulang di top/bottom halaman
-        val edgeFreq = mutableMapOf<String, Int>()
-        for (ln in lines) {
-            if (ln.yNorm < 0.08f || ln.yNorm > 0.91f) {
-                val norm = ln.text.lowercase().replace(Regex("\\d+"), "#").trim()
-                edgeFreq[norm] = (edgeFreq[norm] ?: 0) + 1
+        for (pl in layouts) {
+            val lines = pl.lines
+            var i = 0
+            while (i < lines.size) {
+                val line = lines[i]
+                // Baris kandidat tabel punya minimal 2 kolom terpisah dengan sel pertama bukan sekadar bullet
+                val firstColText = line.spans.firstOrNull()?.text.orEmpty()
+                val isBulletPrefix = firstColText in setOf("•", "-", "*", "▪", "o", "○", "►") ||
+                    firstColText.matches(Regex("^\\d{1,2}[.)]$"))
+
+                if (line.spans.size >= 2 && !isBulletPrefix) {
+                    val candidateGroup = mutableListOf<SpatialLine>()
+                    candidateGroup.add(line)
+                    var j = i + 1
+                    while (j < lines.size) {
+                        val next = lines[j]
+                        val dy = next.y - candidateGroup.last().y
+                        if (dy > line.height * 3.2f) break
+                        if (next.spans.size >= 2) {
+                            candidateGroup.add(next)
+                            j++
+                        } else if (next.spans.size == 1 && dy <= next.height * 1.8f && j + 1 < lines.size && lines[j + 1].spans.size >= 2) {
+                            // Baris lanjutan sel yang turun baris di tengah tabel
+                            candidateGroup.add(next)
+                            j++
+                        } else {
+                            break
+                        }
+                    }
+
+                    val multiColLines = candidateGroup.filter { it.spans.size >= 2 }
+                    if (multiColLines.size >= 2) {
+                        // Bangun cluster batas X kolom
+                        val colStarts = mutableListOf<Float>()
+                        for (row in multiColLines) {
+                            for (sp in row.spans) {
+                                val existingIdx = colStarts.indexOfFirst { abs(it - sp.x) <= 22f }
+                                if (existingIdx == -1) {
+                                    colStarts.add(sp.x)
+                                } else {
+                                    colStarts[existingIdx] = min(colStarts[existingIdx], sp.x)
+                                }
+                            }
+                        }
+                        colStarts.sort()
+
+                        if (colStarts.size in 2..9) {
+                            val grid = mutableListOf<MutableList<String>>()
+                            for (row in candidateGroup) {
+                                if (row.spans.size == 1 && grid.isNotEmpty()) {
+                                    // Gabungkan teks lanjutan ke kolom yang sesuai pada baris sebelumnya
+                                    val sp = row.spans.first()
+                                    val colIdx = findClosestColumn(sp.x, colStarts)
+                                    val prevRow = grid.last()
+                                    prevRow[colIdx] = (prevRow[colIdx] + " " + sp.text).trim()
+                                } else {
+                                    val cells = MutableList(colStarts.size) { "" }
+                                    for (sp in row.spans) {
+                                        val colIdx = findClosestColumn(sp.x, colStarts)
+                                        cells[colIdx] = if (cells[colIdx].isEmpty()) sp.text else "${cells[colIdx]} ${sp.text}"
+                                    }
+                                    grid.add(cells)
+                                }
+                            }
+
+                            // Hapus kolom yang benar-benar kosong di semua baris
+                            val nonEmptyCols = (0 until colStarts.size).filter { c -> grid.any { it[c].isNotBlank() } }
+                            if (nonEmptyCols.size >= 2 && grid.size >= 2) {
+                                val cleanedGrid = grid.map { r -> nonEmptyCols.map { c -> r[c].ifBlank { "-" } } }
+                                val captionAbove = (i - 1 downTo max(0, i - 2))
+                                    .map { lines[it].fullText }
+                                    .firstOrNull { it.matches(Regex("^(Tabel|Table)\\s+\\d+.*", RegexOption.IGNORE_CASE)) }
+                                val title = captionAbove ?: "Tabel #$tableCounter (Halaman ${pl.pageNum})"
+                                allTables.add(
+                                    ExtractedTable(
+                                        title = title,
+                                        page = pl.pageNum,
+                                        headers = cleanedGrid.first(),
+                                        rows = cleanedGrid.drop(1)
+                                    )
+                                )
+                                tableCounter++
+                                i = j
+                                continue
+                            }
+                        }
+                    }
+                }
+                i++
             }
         }
-        val repeatedThreshold = if (pageCount >= 3) 2 else 999
+        return allTables
+    }
 
-        // 2. Hitung median ukuran huruf tubuh dokumen
-        val sizes = lines.map { it.fontSize }.sorted()
-        val medianFont = sizes[sizes.size / 2].coerceIn(8f, 18f)
-
-        val cleanedLines = mutableListOf<Pair<String, Boolean>>() // (lineText, isHeading)
-        for (ln in lines) {
-            val t = ln.text.trim()
-            if (t.isEmpty()) continue
-            if ((ln.yNorm < 0.08f || ln.yNorm > 0.91f)) {
-                val norm = t.lowercase().replace(Regex("\\d+"), "#").trim()
-                if ((edgeFreq[norm] ?: 0) >= repeatedThreshold) continue
-                if (t.matches(Regex("^(hal\\.?|page|slide)?\\s*\\d+\\s*(of|/)?\\s*\\d*$", RegexOption.IGNORE_CASE))) continue
+    private fun findClosestColumn(x: Float, colStarts: List<Float>): Int {
+        var bestIdx = 0
+        var bestDist = Float.MAX_VALUE
+        for (idx in colStarts.indices) {
+            val d = abs(x - colStarts[idx])
+            if (d < bestDist) {
+                bestDist = d
+                bestIdx = idx
             }
+        }
+        return bestIdx
+    }
 
-            val isHeading = (
-                (ln.fontSize >= medianFont * 1.18f && t.length in 3..95) ||
-                (ln.isBold && t.length in 4..80 && !t.endsWith(".") && !t.endsWith(",") && !looksLikeFormula(t)) ||
-                t.matches(Regex("^(BAB|MODUL|PERTEMUAN|MATERI|CHAPTER|SUB\\s*BAB)\\s+[0-9IVX]+.*", RegexOption.IGNORE_CASE))
-            )
-            cleanedLines.add(t to isHeading)
+    /**
+     * Memotong dan mengekstrak gambar, grafik, diagram, dan bagan asli dari setiap halaman PDF.
+     */
+    private fun extractFiguresFromPdf(
+        context: Context,
+        file: File,
+        layouts: List<PageLayoutData>
+    ): List<ExtractedFigure> {
+        val figures = mutableListOf<ExtractedFigure>()
+        val figDir = File(context.filesDir, "kuliahvault/figures").apply { mkdirs() }
+        val stamp = System.currentTimeMillis()
+
+        try {
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            val maxPages = renderer.pageCount.coerceAtMost(24)
+
+            for (pageIdx in 0 until maxPages) {
+                val layout = layouts.getOrNull(pageIdx) ?: continue
+                val page = renderer.openPage(pageIdx)
+                val targetW = 900
+                val scale = targetW.toFloat() / page.width.coerceAtLeast(1)
+                val targetH = (page.height * scale).toInt().coerceAtLeast(1)
+
+                val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+
+                // Buat mask salinan di mana seluruh area teks ditutup putih agar tersisa hanya area gambar/grafik
+                val maskBmp = bmp.copy(Bitmap.Config.ARGB_8888, true)
+                val maskCanvas = Canvas(maskBmp)
+                val whitePaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+
+                // Tutup margin tepi halaman
+                maskCanvas.drawRect(0f, 0f, targetW.toFloat(), targetH * 0.05f, whitePaint)
+                maskCanvas.drawRect(0f, targetH * 0.95f, targetW.toFloat(), targetH.toFloat(), whitePaint)
+
+                val scaleX = targetW.toFloat() / layout.widthPt.coerceAtLeast(1f)
+                val scaleY = targetH.toFloat() / layout.heightPt.coerceAtLeast(1f)
+
+                for (ln in layout.lines) {
+                    for (sp in ln.spans) {
+                        val left = (sp.x * scaleX - 6f).coerceAtLeast(0f)
+                        val right = (sp.endX * scaleX + 6f).coerceAtMost(targetW.toFloat())
+                        val top = ((sp.y - sp.height * 1.15f) * scaleY - 4f).coerceAtLeast(0f)
+                        val bottom = ((sp.y + sp.height * 0.35f) * scaleY + 4f).coerceAtMost(targetH.toFloat())
+                        maskCanvas.drawRect(left, top, right, bottom, whitePaint)
+                    }
+                }
+
+                // Analisis grid 10x10 piksel untuk menemukan klaster grafis/gambar/kurva
+                val cell = 10
+                val gw = targetW / cell
+                val gh = targetH / cell
+                val active = Array(gh) { BooleanArray(gw) }
+                val pixels = IntArray(targetW * targetH)
+                maskBmp.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
+                maskBmp.recycle()
+
+                for (gy in 0 until gh) {
+                    for (gx in 0 until gw) {
+                        var inkCount = 0
+                        val startY = gy * cell
+                        val startX = gx * cell
+                        for (dy in 0 until cell step 2) {
+                            val rowOff = (startY + dy) * targetW
+                            for (dx in 0 until cell step 2) {
+                                val c = pixels[rowOff + startX + dx]
+                                val r = (c shr 16) and 0xFF
+                                val g = (c shr 8) and 0xFF
+                                val b = c and 0xFF
+                                if (r < 238 || g < 238 || b < 238) inkCount++
+                            }
+                        }
+                        if (inkCount >= 3) active[gy][gx] = true
+                    }
+                }
+
+                val visited = Array(gh) { BooleanArray(gw) }
+                val captionLines = layout.lines.filter {
+                    it.fullText.matches(Regex("^(Gambar|Figure|Fig\\.|Grafik|Diagram|Bagan|Kurva)\\s*\\d*.*", RegexOption.IGNORE_CASE))
+                }
+
+                var figIdxOnPage = 1
+                for (sy in 0 until gh) {
+                    for (sx in 0 until gw) {
+                        if (!active[sy][sx] || visited[sy][sx]) continue
+                        var minGx = sx
+                        var maxGx = sx
+                        var minGy = sy
+                        var maxGy = sy
+                        var cellArea = 0
+                        val queue = ArrayDeque<Pair<Int, Int>>()
+                        queue.add(sx to sy)
+                        visited[sy][sx] = true
+
+                        while (queue.isNotEmpty()) {
+                            val (cx, cy) = queue.removeFirst()
+                            cellArea++
+                            if (cx < minGx) minGx = cx
+                            if (cx > maxGx) maxGx = cx
+                            if (cy < minGy) minGy = cy
+                            if (cy > maxGy) maxGy = cy
+
+                            // Jembatani celah hingga 2 sel (20px) agar garis sumbu & panah tetap menyatu
+                            for (ny in (cy - 2)..(cy + 2)) {
+                                for (nx in (cx - 2)..(cx + 2)) {
+                                    if (ny in 0 until gh && nx in 0 until gw && !visited[ny][nx] && active[ny][nx]) {
+                                        visited[ny][nx] = true
+                                        queue.add(nx to ny)
+                                    }
+                                }
+                            }
+                        }
+
+                        val boxW = (maxGx - minGx + 1) * cell
+                        val boxH = (maxGy - minGy + 1) * cell
+                        // Filter ukuran minimal agar garis pembatas tipis tidak ikut terpotong
+                        if (boxW >= 150 && boxH >= 95 && cellArea >= 24) {
+                            val cropLeft = (minGx * cell - 22).coerceAtLeast(0)
+                            val cropTop = (minGy * cell - 22).coerceAtLeast(0)
+                            val cropRight = ((maxGx + 1) * cell + 22).coerceAtMost(targetW)
+                            val cropBottom = ((maxGy + 1) * cell + 22).coerceAtMost(targetH)
+
+                            val cropped = Bitmap.createBitmap(
+                                bmp,
+                                cropLeft,
+                                cropTop,
+                                (cropRight - cropLeft).coerceAtLeast(1),
+                                (cropBottom - cropTop).coerceAtLeast(1)
+                            )
+                            val outFile = File(figDir, "fig_${stamp}_p${pageIdx + 1}_$figIdxOnPage.png")
+                            FileOutputStream(outFile).use { fos -> cropped.compress(Bitmap.CompressFormat.PNG, 92, fos) }
+                            cropped.recycle()
+
+                            val matchedCap = captionLines.minByOrNull { cap ->
+                                val capYpx = cap.y * scaleY
+                                min(abs(capYpx - cropBottom), abs(capYpx - cropTop))
+                            }?.fullText
+
+                            val caption = if (!matchedCap.isNullOrBlank() && matchedCap.length <= 120) {
+                                matchedCap
+                            } else {
+                                "Gambar / Visual #${figures.size + 1} (Halaman ${pageIdx + 1})"
+                            }
+
+                            figures.add(
+                                ExtractedFigure(
+                                    caption = caption,
+                                    page = pageIdx + 1,
+                                    imagePath = outFile.absolutePath
+                                )
+                            )
+                            figIdxOnPage++
+                        }
+                    }
+                }
+                bmp.recycle()
+            }
+            renderer.close()
+            pfd.close()
+        } catch (_: Exception) {
+        }
+        return figures
+    }
+
+    /**
+     * Membangun struktur bab, penyambungan paragraf tipografis, tabel, gambar, rumus, & diagram vektor.
+     */
+    private fun buildStructuredAnalysisFromLayouts(
+        layouts: List<PageLayoutData>,
+        tables: List<ExtractedTable>,
+        figures: List<ExtractedFigure>
+    ): TextAnalysisResult {
+        val allFontSizes = layouts.flatMap { it.lines.map { ln -> ln.fontSize } }.sorted()
+        val medianFs = if (allFontSizes.isNotEmpty()) allFontSizes[allFontSizes.size / 2] else 11f
+
+        val sections = mutableListOf<SectionBlock>()
+        var currentHeading = "Pendahuluan & Ringkasan Materi"
+        var currentPage = 1
+        val currentBullets = mutableListOf<String>()
+        val paragraphLines = mutableListOf<String>()
+        var prevLineY = -1f
+        var prevLineX = -1f
+
+        fun flushParagraph() {
+            if (paragraphLines.isNotEmpty()) {
+                val stitched = stitchLinesIntoCleanParagraph(paragraphLines)
+                if (stitched.isNotBlank()) {
+                    currentBullets.add(stitched)
+                }
+                paragraphLines.clear()
+            }
         }
 
-        // 3. Gabungkan baris kalimat yang terpotong (De-hyphenation & Paragraph Merging)
-        val out = StringBuilder()
-        var buffer = StringBuilder()
-
-        fun flushBuffer() {
-            val s = buffer.toString().trim()
-            if (s.isNotEmpty()) {
-                out.append(s).append("\n\n")
+        fun flushSection() {
+            flushParagraph()
+            if (currentBullets.isNotEmpty()) {
+                sections.add(
+                    SectionBlock(
+                        heading = currentHeading,
+                        bullets = currentBullets.toList(),
+                        body = "",
+                        page = currentPage
+                    )
+                )
+                currentBullets.clear()
             }
-            buffer = StringBuilder()
         }
 
-        for ((rawLine, isHeading) in cleanedLines) {
-            val line = normalizeBulletPrefix(rawLine)
-            val isBullet = line.startsWith("• ") || line.matches(Regex("^(\\d+[.)]|[a-zA-Z][.)])\\s+.*"))
-            val isFormula = looksLikeFormula(line)
+        for (pl in layouts) {
+            prevLineY = -1f
+            for (ln in pl.lines) {
+                val txt = ln.fullText.trim()
+                if (txt.isEmpty()) continue
 
-            if (isHeading) {
-                flushBuffer()
-                out.append("[BAB] ").append(line).append("\n")
-                continue
+                val isTypographicHeading = (ln.fontSize >= medianFs * 1.16f && txt.length in 3..115) ||
+                    (ln.isBold && txt.length in 4..95 && !txt.endsWith(".") && !txt.endsWith(",") && ln.spans.size == 1)
+                val isRegexHeading = txt.matches(Regex("^(BAB|CHAPTER|MODUL|PERTEMUAN|BAGIAN)\\s+[IVX0-9]+.*", RegexOption.IGNORE_CASE)) ||
+                    txt.matches(Regex("^\\d+(\\.\\d+){0,2}\\s+[A-Z][A-Za-z0-9\\s,&()/-]{3,85}$"))
+
+                if (isTypographicHeading || isRegexHeading) {
+                    flushSection()
+                    currentHeading = txt
+                    currentPage = pl.pageNum
+                    prevLineY = ln.y
+                    prevLineX = ln.minX
+                    continue
+                }
+
+                val isBullet = txt.matches(Regex("^([•\\-*▪◦►]|\\d{1,2}[.)]|[a-zA-Z][.)])\\s+.*"))
+                if (isBullet) {
+                    flushParagraph()
+                    val cleanBullet = txt
+                        .replace(Regex("^[•\\-*▪◦►]\\s*"), "• ")
+                        .replace(Regex("\\s{2,}"), " ")
+                    currentBullets.add(cleanBullet)
+                    prevLineY = ln.y
+                    prevLineX = ln.minX
+                    continue
+                }
+
+                val verticalJump = if (prevLineY >= 0f) (ln.y - prevLineY) else 0f
+                val indentShift = if (prevLineX >= 0f) abs(ln.minX - prevLineX) else 0f
+                if (paragraphLines.isNotEmpty() && (verticalJump > ln.height * 1.85f || indentShift > 28f)) {
+                    flushParagraph()
+                }
+                paragraphLines.add(txt)
+                prevLineY = ln.y
+                prevLineX = ln.minX
             }
+        }
+        flushSection()
 
-            if (isBullet || isFormula) {
-                flushBuffer()
-                out.append(line).append("\n")
-                continue
-            }
+        val rawCombined = layouts.joinToString("\n") { pl -> pl.lines.joinToString("\n") { it.fullText } }
+        val baseTextAnalysis = analyzeText(rawCombined)
+        val diagrams = generateProceduralDiagrams(rawCombined, sections)
 
-            if (buffer.isEmpty()) {
-                buffer.append(line)
+        return baseTextAnalysis.copy(
+            sections = if (sections.isNotEmpty()) sections else baseTextAnalysis.sections,
+            tables = if (tables.isNotEmpty()) tables else baseTextAnalysis.tables,
+            figures = figures,
+            diagrams = diagrams,
+            schemaVersion = 2
+        )
+    }
+
+    private fun stitchLinesIntoCleanParagraph(lines: List<String>): String {
+        val sb = StringBuilder()
+        for (raw in lines) {
+            val part = raw.trim()
+            if (part.isEmpty()) continue
+            if (sb.isEmpty()) {
+                sb.append(part)
+            } else if (sb.endsWith("-")) {
+                sb.deleteCharAt(sb.length - 1)
+                sb.append(part)
             } else {
-                val cur = buffer.toString()
-                // Jika kata terpotong tanda hubung di akhir baris (misal: "per-\nancangan")
-                if (cur.endsWith("-") && line.firstOrNull()?.isLowerCase() == true) {
-                    buffer.deleteCharAt(buffer.length - 1)
-                    buffer.append(line)
-                } else if (!cur.endsWith(".") && !cur.endsWith(":") && !cur.endsWith("!") && !cur.endsWith("?") && cur.length < 360) {
-                    buffer.append(' ').append(line)
-                } else {
-                    flushBuffer()
-                    buffer.append(line)
+                sb.append(' ').append(part)
+            }
+        }
+        return sb.toString().replace(Regex("\\s{2,}"), " ").trim()
+    }
+
+    /**
+     * Menghasilkan diagram vektor prosedural (Flowchart tahapan & Kurva Teknik Industri) dari isi dokumen.
+     */
+    private fun generateProceduralDiagrams(rawText: String, sections: List<SectionBlock>): List<ProceduralDiagram> {
+        val out = mutableListOf<ProceduralDiagram>()
+        val lower = rawText.lowercase()
+
+        // 1. Deteksi tahapan berurutan (1 -> 2 -> 3 -> 4) untuk digambar sebagai Flowchart
+        val stepNodes = mutableListOf<String>()
+        for (sec in sections) {
+            if (sec.heading.matches(Regex("^\\d+[.)]\\s+.*")) && stepNodes.size < 6) {
+                stepNodes.add(sec.heading.replace(Regex("^\\d+[.)]\\s+"), "").take(34))
+            }
+        }
+        if (stepNodes.size < 3) {
+            stepNodes.clear()
+            rawText.lines().forEach { ln ->
+                val m = Regex("^(\\d+)[.)]\\s+([A-Z][A-Za-z0-9\\s]{4,36})").find(ln.trim())
+                if (m != null && stepNodes.size < 6) {
+                    stepNodes.add(m.groupValues[2].trim())
                 }
             }
         }
-        flushBuffer()
+        if (stepNodes.size >= 3) {
+            out.add(ProceduralDiagram("Diagram Alur Tahapan Materi", "flow", stepNodes))
+        }
 
-        return out.toString()
-            .replace(Regex("[ \\t]+"), " ")
-            .replace(Regex("\\n{3,}"), "\n\n")
+        // 2. Deteksi kurva Teknik Industri
+        if (lower.contains("break-even") || lower.contains("break even") || lower.contains("titik impas") || Regex("\\bbep\\b").containsMatchIn(lower)) {
+            out.add(ProceduralDiagram("Kurva Analisis Break-Even Point (BEP)", "bep", listOf("Total Revenue (TR)", "Total Cost (TC)", "Fixed Cost (FC)", "Titik Impas (BEP)")))
+        }
+        if (lower.contains("economic order quantity") || Regex("\\beoq\\b").containsMatchIn(lower)) {
+            out.add(ProceduralDiagram("Kurva Biaya Persediaan & EOQ Optimal", "eoq", listOf("Total Cost", "Holding Cost", "Ordering Cost", "Titik Optimal EOQ")))
+        }
+        if (lower.contains("distribusi normal") || lower.contains("normal distribution") || lower.contains("deviasi standar")) {
+            out.add(ProceduralDiagram("Kurva Distribusi Normal (Bell Curve)", "normal", listOf("-2σ", "-1σ", "Mean (μ)", "+1σ", "+2σ")))
+        }
+
+        return out
+    }
+
+    /**
+     * Merender ProceduralDiagram menjadi Bitmap vektor resolusi tinggi untuk ditampilkan & dicetak.
+     */
+    fun renderProceduralDiagramBitmap(diagram: ProceduralDiagram): Bitmap {
+        val w = 900
+        val h = if (diagram.kind == "flow") (130 + diagram.nodes.size * 95).coerceIn(320, 760) else 460
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#F8FAFC"))
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#CBD5E1")
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        canvas.drawRoundRect(RectF(8f, 8f, w - 8f, h - 8f), 22f, 22f, borderPaint)
+
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#1E1B4B")
+            textSize = 26f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        canvas.drawText(diagram.title, 34f, 48f, titlePaint)
+
+        when (diagram.kind) {
+            "flow" -> {
+                val boxFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#EEF2FF") }
+                val boxStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#4F46E5")
+                    style = Paint.Style.STROKE
+                    strokeWidth = 3.5f
+                }
+                val numBadge = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#4F46E5") }
+                val numText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.WHITE
+                    textSize = 20f
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    textAlign = Paint.Align.CENTER
+                }
+                val nodeText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#0F172A")
+                    textSize = 22f
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                }
+                val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#4F46E5")
+                    strokeWidth = 4f
+                }
+
+                var y = 82f
+                diagram.nodes.forEachIndexed { idx, label ->
+                    val rect = RectF(90f, y, w - 90f, y + 62f)
+                    canvas.drawRoundRect(rect, 16f, 16f, boxFill)
+                    canvas.drawRoundRect(rect, 16f, 16f, boxStroke)
+                    canvas.drawCircle(132f, y + 31f, 18f, numBadge)
+                    canvas.drawText("${idx + 1}", 132f, y + 38f, numText)
+                    canvas.drawText(label, 168f, y + 39f, nodeText)
+
+                    if (idx < diagram.nodes.lastIndex) {
+                        val midX = w / 2f
+                        canvas.drawLine(midX, y + 62f, midX, y + 92f, arrowPaint)
+                        canvas.drawLine(midX - 10f, y + 80f, midX, y + 92f, arrowPaint)
+                        canvas.drawLine(midX + 10f, y + 80f, midX, y + 92f, arrowPaint)
+                    }
+                    y += 92f
+                }
+            }
+
+            "bep" -> {
+                val axis = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334155"); strokeWidth = 3.5f }
+                canvas.drawLine(100f, 380f, 820f, 380f, axis)
+                canvas.drawLine(100f, 90f, 100f, 380f, axis)
+
+                val fcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#64748B"); strokeWidth = 3.5f }
+                val tcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#DC2626"); strokeWidth = 4.5f }
+                val trPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#16A34A"); strokeWidth = 4.5f }
+
+                // FC horizontal
+                canvas.drawLine(100f, 280f, 780f, 280f, fcPaint)
+                // TC starts at FC
+                canvas.drawLine(100f, 280f, 780f, 140f, tcPaint)
+                // TR starts at origin (100, 380)
+                canvas.drawLine(100f, 380f, 780f, 100f, trPaint)
+
+                // BEP Intersection at ~(440, 210)
+                val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#4F46E5") }
+                canvas.drawCircle(440f, 210f, 11f, dotPaint)
+
+                val lbl = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 19f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+                lbl.color = Color.parseColor("#16A34A"); canvas.drawText("TR (Pendapatan)", 620f, 115f, lbl)
+                lbl.color = Color.parseColor("#DC2626"); canvas.drawText("TC (Total Biaya)", 620f, 185f, lbl)
+                lbl.color = Color.parseColor("#64748B"); canvas.drawText("FC (Biaya Tetap)", 620f, 270f, lbl)
+                lbl.color = Color.parseColor("#4F46E5"); canvas.drawText("Titik Impas (BEP)", 458f, 215f, lbl)
+                lbl.color = Color.parseColor("#0F172A"); canvas.drawText("Volume Produksi (Q) →", 590f, 415f, lbl)
+            }
+
+            "eoq" -> {
+                val axis = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334155"); strokeWidth = 3.5f }
+                canvas.drawLine(100f, 380f, 820f, 380f, axis)
+                canvas.drawLine(100f, 90f, 100f, 380f, axis)
+
+                val holdPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0284C7"); strokeWidth = 4f }
+                canvas.drawLine(100f, 380f, 760f, 150f, holdPaint)
+
+                val ordPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#D97706"); strokeWidth = 4f; style = Paint.Style.STROKE }
+                val tcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#4F46E5"); strokeWidth = 4.5f; style = Paint.Style.STROKE }
+
+                for (x in 130..750 step 10) {
+                    val t = (x - 100f) / 650f
+                    val yOrd = (380f - (95f / (t + 0.28f))).coerceIn(100f, 375f)
+                    val yHold = 380f - t * 230f
+                    val yTot = (yOrd + yHold - 380f).coerceIn(95f, 360f)
+                    if (x > 130) {
+                        val pt = (x - 110f) / 650f
+                        val pyOrd = (380f - (95f / (pt + 0.28f))).coerceIn(100f, 375f)
+                        val pyHold = 380f - pt * 230f
+                        val pyTot = (pyOrd + pyHold - 380f).coerceIn(95f, 360f)
+                        canvas.drawLine((x - 10).toFloat(), pyOrd, x.toFloat(), yOrd, ordPaint)
+                        canvas.drawLine((x - 10).toFloat(), pyTot, x.toFloat(), yTot, tcPaint)
+                    }
+                }
+                val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#DC2626") }
+                canvas.drawCircle(375f, 285f, 10f, dot)
+                val lbl = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 19f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+                lbl.color = Color.parseColor("#4F46E5"); canvas.drawText("Total Cost (TC)", 560f, 115f, lbl)
+                lbl.color = Color.parseColor("#0284C7"); canvas.drawText("Holding Cost", 610f, 185f, lbl)
+                lbl.color = Color.parseColor("#D97706"); canvas.drawText("Ordering Cost", 600f, 335f, lbl)
+                lbl.color = Color.parseColor("#DC2626"); canvas.drawText("EOQ*", 360f, 412f, lbl)
+            }
+
+            else -> {
+                val axis = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#334155"); strokeWidth = 3.5f }
+                canvas.drawLine(100f, 360f, 800f, 360f, axis)
+                val curve = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#4F46E5"); strokeWidth = 4.5f }
+                val midX = 450f
+                for (x in 120..780 step 6) {
+                    val z = (x - midX) / 110.0
+                    val y = 360f - (230.0 * kotlin.math.exp(-0.5 * z * z)).toFloat()
+                    val pz = (x - 6 - midX) / 110.0
+                    val py = 360f - (230.0 * kotlin.math.exp(-0.5 * pz * pz)).toFloat()
+                    canvas.drawLine((x - 6).toFloat(), py, x.toFloat(), y, curve)
+                }
+                canvas.drawLine(midX, 125f, midX, 360f, axis)
+                val lbl = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#1E1B4B")
+                    textSize = 20f
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    textAlign = Paint.Align.CENTER
+                }
+                canvas.drawText("Mean (μ)", midX, 395f, lbl)
+                canvas.drawText("-1σ", midX - 110f, 395f, lbl)
+                canvas.drawText("+1σ", midX + 110f, 395f, lbl)
+            }
+        }
+        return bmp
+    }
+
+    // ==================== TEXT & FORMULA ANALYZER ====================
+
+    fun analyzeText(rawText: String): TextAnalysisResult {
+        val clean = rawText
+            .replace("\r\n", "\n")
+            .replace(Regex("[ \t]+"), " ")
             .trim()
-    }
+        if (clean.isEmpty()) {
+            return TextAnalysisResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList())
+        }
 
-    private fun normalizeBulletPrefix(line: String): String {
-        return line
-            .replace(Regex("^[▪▫●○◆◇►▸➢➣✓✔]\\s*"), "• ")
-            .replace(Regex("^[-*]\\s+(?=[A-Za-z0-9])"), "• ")
-    }
+        val lines = clean.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.matches(Regex("^---\\s*Halaman\\s+\\d+\\s*---$", RegexOption.IGNORE_CASE)) }
 
-    // ==================== 2. ANALISIS MATERI, RUMUS TI & GLOSARIUM ====================
+        val sections = mutableListOf<SectionBlock>()
+        var currentHeading = "Ringkasan Materi"
+        val currentBullets = mutableListOf<String>()
+        val currentPara = mutableListOf<String>()
 
-    fun analyzeText(text: String): TextAnalysisResult {
-        val rawLines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        if (rawLines.isEmpty()) return TextAnalysisResult(emptyList(), emptyList(), emptyList())
+        fun flushSection() {
+            if (currentBullets.isNotEmpty() || currentPara.isNotEmpty()) {
+                sections.add(
+                    SectionBlock(
+                        heading = currentHeading,
+                        bullets = currentBullets.toList(),
+                        body = currentPara.joinToString(" ").trim()
+                    )
+                )
+                currentBullets.clear()
+                currentPara.clear()
+            }
+        }
 
-        // A. Bangun Struktur Bab / Topik (Sections)
-        val sections = buildStructuredSections(rawLines)
+        for (line in lines) {
+            val isHeading = line.matches(Regex("^(BAB|CHAPTER|MODUL|PERTEMUAN|BAGIAN)\\s+[IVX0-9]+.*", RegexOption.IGNORE_CASE)) ||
+                line.matches(Regex("^\\d+(\\.\\d+){0,2}\\s+[A-Z][A-Za-z0-9\\s,&()/-]{3,75}$")) ||
+                (line.length in 5..65 && line == line.uppercase(Locale.getDefault()) && line.any { it.isLetter() } && !line.contains("="))
 
-        // B. Ekstrak Rumus Matematika & Teknik Industri beserta Keterangan Variabel
-        val formulaDetails = extractDetailedFormulas(rawLines)
-        val formulaPairs = formulaDetails.map { it.label to it.expression }
+            if (isHeading) {
+                flushSection()
+                currentHeading = line
+            } else if (line.startsWith("•") || line.startsWith("-") || line.startsWith("*") || line.matches(Regex("^\\d+[.)]\\s+.*"))) {
+                currentBullets.add(line)
+            } else {
+                currentPara.add(line)
+            }
+        }
+        flushSection()
 
-        // C. Ekstrak Glosarium / Definisi Penting (filter metadata sampul)
-        val definitions = extractCleanDefinitions(rawLines)
+        val definitions = mutableListOf<Pair<String, String>>()
+        val defRegex = Regex("^([A-Za-z][A-Za-z0-9\\s()-]{2,42})\\s+(adalah|merupakan|ialah|yaitu|didefinisikan sebagai)\\s+(.{18,240})", RegexOption.IGNORE_CASE)
+        for (line in lines) {
+            val m = defRegex.find(line)
+            if (m != null && definitions.size < 16) {
+                val term = m.groupValues[1].trim()
+                val desc = "${m.groupValues[2]} ${m.groupValues[3]}".trim().trimEnd('.') + "."
+                if (definitions.none { it.first.equals(term, ignoreCase = true) }) {
+                    definitions.add(term to desc)
+                }
+            }
+        }
 
-        // D. Ekstrak Intisari Materi berbasis Skor Kepadatan Kata Kunci (TF-IDF + Domain Weight)
-        val summary = extractRankedKeyPoints(rawLines, maxPoints = 7)
+        val formulaDetails = extractDetailedFormulas(clean)
+        val formulas = formulaDetails.map { it.label to it.expression }
+
+        // Fallback deteksi tabel dari teks (jika ada pemisah '|' atau tab)
+        val textTables = extractPipeOrTabTables(lines)
+
+        val sentences = clean
+            .replace("\n", " ")
+            .split(Regex("(?<=[.!?])\\s+"))
+            .map { it.trim() }
+            .filter { it.length in 38..230 && !it.startsWith("---") }
+
+        val allKw = COURSE_KEYWORDS.values.flatten().map { it.first }.toSet()
+        val scored = sentences.mapIndexed { idx, s ->
+            val lower = s.lowercase()
+            var score = (s.length / 42.0).coerceAtMost(3.5)
+            for (kw in allKw) {
+                if (lower.contains(kw)) score += 2.2
+            }
+            if (lower.contains("adalah") || lower.contains("merupakan") || lower.contains("tujuan") || lower.contains("digunakan untuk")) {
+                score += 1.6
+            }
+            if (idx < 3) score += 1.2
+            Triple(idx, s, score)
+        }
+        val summary = scored
+            .sortedByDescending { it.third }
+            .take(6)
+            .sortedBy { it.first }
+            .map { it.second }
 
         return TextAnalysisResult(
             summary = summary,
+            sections = sections,
             definitions = definitions,
-            formulas = formulaPairs,
+            formulas = formulas,
             formulaDetails = formulaDetails,
-            sections = sections
+            tables = textTables,
+            figures = emptyList(),
+            diagrams = generateProceduralDiagrams(clean, sections),
+            schemaVersion = 2
         )
     }
 
-    private fun buildStructuredSections(lines: List<String>): List<StudySection> {
-        val sections = mutableListOf<StudySection>()
-        var currentHeading = "Ringkasan Materi"
-        val bullets = mutableListOf<String>()
-        val bodyLines = mutableListOf<String>()
-
-        fun commitSection() {
-            if (bullets.isNotEmpty() || bodyLines.isNotEmpty()) {
-                sections.add(
-                    StudySection(
-                        heading = currentHeading,
-                        bullets = bullets.toList(),
-                        body = bodyLines.joinToString("\n\n")
-                    )
-                )
+    private fun extractPipeOrTabTables(lines: List<String>): List<ExtractedTable> {
+        val out = mutableListOf<ExtractedTable>()
+        var i = 0
+        var idxCount = 1
+        while (i < lines.size) {
+            val ln = lines[i]
+            val splitter = when {
+                ln.count { it == '|' } >= 2 -> "|"
+                ln.contains("\t") -> "\t"
+                else -> null
             }
-            bullets.clear()
-            bodyLines.clear()
-        }
-
-        for (ln in lines) {
-            if (ln.startsWith("[BAB] ")) {
-                val h = ln.removePrefix("[BAB] ").trim()
-                if (!isBoilerplateLine(h)) {
-                    commitSection()
-                    currentHeading = h
+            if (splitter != null) {
+                val block = mutableListOf<List<String>>()
+                var j = i
+                while (j < lines.size && lines[j].contains(splitter)) {
+                    val cells = lines[j].split(splitter).map { it.trim() }.filter { it.isNotEmpty() && !it.matches(Regex("^[-:]+$")) }
+                    if (cells.size >= 2) block.add(cells)
+                    j++
                 }
-            } else if (isBoilerplateLine(ln)) {
-                continue
-            } else if (ln.startsWith("• ") || ln.matches(Regex("^(\\d+[.)]|[a-zA-Z][.)])\\s+.*"))) {
-                bullets.add(ln)
-            } else {
-                bodyLines.add(ln)
-            }
-        }
-        commitSection()
-        return sections.take(25)
-    }
-
-    private fun isBoilerplateLine(line: String): Boolean {
-        val clean = line.removePrefix("[BAB] ").trim()
-        if (clean.length < 3) return true
-        return BOILERPLATE_PATTERNS.any { it.containsMatchIn(clean) }
-    }
-
-    private fun extractRankedKeyPoints(lines: List<String>, maxPoints: Int): List<String> {
-        val candidates = mutableListOf<String>()
-        for (raw in lines) {
-            if (raw.startsWith("[BAB] ")) continue
-            val clean = raw.removePrefix("• ").trim()
-            if (isBoilerplateLine(clean)) continue
-            if (looksLikeFormula(clean)) continue
-
-            // Pecah paragraf panjang menjadi kalimat utuh
-            val sentences = clean.split(Regex("(?<=[.!?])\\s+"))
-            for (s in sentences) {
-                val st = s.trim()
-                if (st.length in 38..240 && !isBoilerplateLine(st) && !looksLikeFormula(st)) {
-                    candidates.add(st)
-                }
-            }
-        }
-        if (candidates.isEmpty()) return emptyList()
-
-        // Hitung frekuensi kata bermakna (TF)
-        val termFreq = mutableMapOf<String, Int>()
-        for (c in candidates) {
-            tokenizeMeaningful(c).forEach { tok ->
-                termFreq[tok] = (termFreq[tok] ?: 0) + 1
-            }
-        }
-
-        val allDomainKeywords = COURSE_KEYWORDS.values.flatten().map { it.first }.toSet()
-
-        val scored = candidates.mapIndexed { idx, sent ->
-            val tokens = tokenizeMeaningful(sent)
-            var score = tokens.sumOf { (termFreq[it] ?: 1).coerceAtMost(5) }.toDouble() / max(tokens.size, 4)
-            val lower = sent.lowercase()
-            if (allDomainKeywords.any { lower.contains(it) }) score += 2.2
-            if (lower.contains("adalah") || lower.contains("merupakan") || lower.contains("tujuan") || lower.contains("fungsi") || lower.contains("metode")) {
-                score += 1.5
-            }
-            // Penalti sedikit untuk halaman paling awal yang sering berisi info administratif
-            if (idx == 0 && candidates.size > 5) score -= 0.4
-            Triple(idx, sent, score)
-        }
-
-        val topSelected = scored
-            .sortedByDescending { it.third }
-            .distinctBy { it.second.lowercase().take(45) }
-            .take(maxPoints)
-            .sortedBy { it.first } // Kembalikan sesuai urutan alur materi
-            .map { it.second }
-
-        return topSelected
-    }
-
-    private fun tokenizeMeaningful(text: String): List<String> {
-        return text.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
-            .split(Regex("\\s+"))
-            .filter { it.length >= 4 && it !in STOPWORDS_ID_EN }
-    }
-
-    private fun extractCleanDefinitions(lines: List<String>): List<Pair<String, String>> {
-        val definitions = mutableListOf<Pair<String, String>>()
-        val defRegex = Regex(
-            "^([A-Z][A-Za-z0-9\\s\\-()/]{2,48}?)\\s+(adalah|merupakan|yaitu|ialah|didefinisikan sebagai)\\s+([^.!?]{18,210}[.!?]?)"
-        )
-        val colonGlossaryRegex = Regex(
-            "^([A-Z][A-Za-z0-9\\s\\-()/]{2,36})\\s*:\\s*([A-Za-z][^\\n]{22,190})$"
-        )
-
-        for (raw in lines) {
-            if (raw.startsWith("[BAB] ")) continue
-            val clean = raw.removePrefix("• ").trim()
-            if (isBoilerplateLine(clean)) continue
-
-            val sentences = clean.split(Regex("(?<=[.!?])\\s+"))
-            for (s in sentences) {
-                val st = s.trim()
-                val m1 = defRegex.find(st)
-                if (m1 != null) {
-                    val term = m1.groupValues[1].trim()
-                    val desc = m1.groupValues[3].trim()
-                    if (!isBoilerplateLine(term) && definitions.none { it.first.equals(term, ignoreCase = true) }) {
-                        definitions.add(term to desc)
-                    }
+                if (block.size >= 2) {
+                    val maxCols = block.maxOf { it.size }
+                    val norm = block.map { r -> r + List((maxCols - r.size).coerceAtLeast(0)) { "-" } }
+                    out.add(ExtractedTable("Tabel #$idxCount", 1, norm.first(), norm.drop(1)))
+                    idxCount++
+                    i = j
                     continue
                 }
-                val m2 = colonGlossaryRegex.find(st)
-                if (m2 != null && !looksLikeFormula(st)) {
-                    val term = m2.groupValues[1].trim()
-                    val desc = m2.groupValues[2].trim()
-                    if (!isBoilerplateLine(term) && definitions.none { it.first.equals(term, ignoreCase = true) }) {
-                        definitions.add(term to desc)
-                    }
-                }
             }
-            if (definitions.size >= 15) break
-        }
-        return definitions
-    }
-
-    fun looksLikeFormula(rawLine: String): Boolean {
-        val line = rawLine.removePrefix("• ").trim()
-        if (line.length !in 4..105) return false
-        if (line.contains("http://", true) || line.contains("https://", true) || line.contains("www.", true)) return false
-
-        val hasMathUnicode = line.any { it in MATH_UNICODE_CHARS }
-        val hasIeSymbol = IE_SYMBOL_REGEX.containsMatchIn(line)
-        val hasRelation = line.contains('=') || line.contains('≈') || line.contains('≤') || line.contains('≥')
-        val hasOperator = line.any { it in charArrayOf('+', '-', '*', '/', '^', '×', '÷', '√', '∑', '∫') }
-        val hasSubOrPow = line.contains(Regex("[A-Za-z][_^]\\{?[0-9a-zA-Z]+\\}?")) || line.contains(Regex("\\b[xyzXYZ][1-9]\\b"))
-
-        if (!hasRelation && !hasMathUnicode && !hasIeSymbol) return false
-
-        // Hindari kalimat naratif panjang yang kebetulan mengandung tanda '-'
-        val words = line.split(Regex("\\s+"))
-        val normalWords = words.count { it.length >= 4 && it.all(Char::isLetter) && it.lowercase() in STOPWORDS_ID_EN }
-        if (normalWords >= 3) return false
-
-        return (hasRelation && (hasOperator || hasMathUnicode || hasIeSymbol || hasSubOrPow || line.any(Char::isDigit))) ||
-            (hasMathUnicode && (hasOperator || line.any(Char::isDigit)))
-    }
-
-    fun extractFormulas(text: String): List<Pair<String, String>> {
-        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        return extractDetailedFormulas(lines).map { it.label to it.expression }
-    }
-
-    private fun extractDetailedFormulas(lines: List<String>): List<FormulaItem> {
-        val out = mutableListOf<FormulaItem>()
-        var lastHeading = ""
-
-        for (i in lines.indices) {
-            val raw = lines[i]
-            if (raw.startsWith("[BAB] ")) {
-                lastHeading = raw.removePrefix("[BAB] ").trim()
-                continue
-            }
-            val clean = raw.removePrefix("• ").trim()
-            if (!looksLikeFormula(clean)) continue
-
-            val leftSide = clean.substringBefore("=").substringBefore("≈").substringBefore("≤").substringBefore("≥").trim()
-            val label = when {
-                leftSide.length in 1..24 -> "Rumus $leftSide"
-                lastHeading.length in 3..34 -> lastHeading
-                else -> "Persamaan #${out.size + 1}"
-            }
-
-            // Cari keterangan variabel di baris-baris tepat di bawah rumus ("dimana:", "dengan:", "x = ...")
-            val varNotes = mutableListOf<String>()
-            var j = i + 1
-            while (j < lines.size && varNotes.size < 4) {
-                val nextLn = lines[j].removePrefix("• ").trim()
-                if (nextLn.matches(Regex("^(dimana|di mana|dengan|keterangan|where)\\s*:?$", RegexOption.IGNORE_CASE))) {
-                    j++
-                    continue
-                }
-                if (nextLn.matches(Regex("^[A-Za-zα-ωΔΣ_0-9()]{1,12}\\s*(=|:|adalah)\\s*[^=]{3,70}$")) && !looksLikeFormula(nextLn)) {
-                    varNotes.add(nextLn)
-                    j++
-                } else {
-                    break
-                }
-            }
-
-            if (out.none { it.expression == clean }) {
-                out.add(
-                    FormulaItem(
-                        label = label,
-                        expression = clean,
-                        variableNotes = varNotes.joinToString(" • ")
-                    )
-                )
-            }
-            if (out.size >= 20) break
+            i++
         }
         return out
     }
 
-    fun analysisToJson(a: TextAnalysisResult): String {
+    fun looksLikeFormula(line: String): Boolean {
+        val trimmed = line.trim()
+        if (trimmed.length !in 4..120) return false
+        val hasEq = trimmed.contains("=") || trimmed.contains("≈") || trimmed.contains("≤") || trimmed.contains("≥")
+        val hasMathSymbol = trimmed.any { it in charArrayOf('∑', '∫', '√', 'σ', 'μ', 'λ', 'π', 'Δ', '×', '÷', '^') } ||
+            trimmed.contains("sqrt(", ignoreCase = true) ||
+            trimmed.contains("lim", ignoreCase = true)
+        val hasVarAssignment = Regex("^[A-Za-z][A-Za-z0-9_()]{0,14}\\s*=\\s*[A-Za-z0-9()\\[\\]+\\-*/^.,\\s√∑σμλ]+$").matches(trimmed)
+        return (hasEq && (hasVarAssignment || hasMathSymbol || trimmed.count { it in "+-*/^()" } >= 1)) ||
+            (hasMathSymbol && trimmed.count { it.isLetterOrDigit() } >= 2)
+    }
+
+    fun extractDetailedFormulas(rawText: String): List<FormulaItem> {
+        val out = mutableListOf<FormulaItem>()
+        val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        for (i in lines.indices) {
+            val line = lines[i]
+            if (!looksLikeFormula(line) || out.size >= 24) continue
+            if (out.any { it.expression.equals(line, ignoreCase = true) }) continue
+
+            val prev = lines.getOrNull(i - 1).orEmpty()
+            val label = if (prev.length in 5..65 && !looksLikeFormula(prev) && !prev.startsWith("---")) {
+                prev.trimEnd(':', '.')
+            } else {
+                "Rumus #${out.size + 1}"
+            }
+
+            val varNotes = mutableListOf<String>()
+            val tokens = Regex("\\b[A-Za-z]{1,5}\\b").findAll(line).map { it.value.lowercase() }.toSet()
+            for (tok in tokens) {
+                FORMULA_VARIABLE_HINTS[tok]?.let { varNotes.add(it) }
+            }
+            for (k in 1..3) {
+                val nextLine = lines.getOrNull(i + k).orEmpty()
+                if (nextLine.matches(Regex("^(dimana|keterangan|dengan)\\s*:?.*", RegexOption.IGNORE_CASE)) ||
+                    nextLine.matches(Regex("^[A-Za-z]{1,4}\\s*=\\s*[A-Za-z\\s]{4,45}$"))
+                ) {
+                    varNotes.add(nextLine)
+                }
+            }
+            out.add(FormulaItem(label, line, varNotes.distinct().joinToString(" • ")))
+        }
+        return out
+    }
+
+    fun extractFormulas(rawText: String): List<Pair<String, String>> =
+        extractDetailedFormulas(rawText).map { it.label to it.expression }
+
+    fun analysisToJson(analysis: TextAnalysisResult): String {
         val root = JSONObject()
-        root.put("summary", JSONArray(a.summary))
-
-        val defs = JSONArray()
-        a.definitions.forEach { (t, d) ->
-            defs.put(JSONObject().apply {
-                put("term", t)
-                put("desc", d)
-            })
-        }
-        root.put("definitions", defs)
-
-        val forms = JSONArray()
-        a.formulas.forEach { (l, e) ->
-            forms.put(JSONObject().apply {
-                put("label", l)
-                put("expr", e)
-            })
-        }
-        root.put("formulas", forms)
-
-        val fDetails = JSONArray()
-        a.formulaDetails.forEach { f ->
-            fDetails.put(JSONObject().apply {
-                put("label", f.label)
-                put("expr", f.expression)
-                put("notes", f.variableNotes)
-            })
-        }
-        root.put("formulaDetails", fDetails)
+        root.put("schemaVersion", analysis.schemaVersion)
+        root.put("summary", JSONArray(analysis.summary))
 
         val secArr = JSONArray()
-        a.sections.forEach { s ->
+        for (s in analysis.sections) {
             secArr.put(JSONObject().apply {
                 put("heading", s.heading)
                 put("bullets", JSONArray(s.bullets))
                 put("body", s.body)
+                put("page", s.page)
             })
         }
         root.put("sections", secArr)
+
+        val defArr = JSONArray()
+        for ((t, d) in analysis.definitions) {
+            defArr.put(JSONObject().apply {
+                put("term", t)
+                put("desc", d)
+            })
+        }
+        root.put("definitions", defArr)
+
+        val fArr = JSONArray()
+        val details = analysis.formulaDetails.ifEmpty {
+            analysis.formulas.map { FormulaItem(it.first, it.second, "") }
+        }
+        for (fd in details) {
+            fArr.put(JSONObject().apply {
+                put("label", fd.label)
+                put("expression", fd.expression)
+                put("variableNotes", fd.variableNotes)
+            })
+        }
+        root.put("formulas", fArr)
+
+        val tabArr = JSONArray()
+        for (tb in analysis.tables) {
+            val rowsJson = JSONArray()
+            for (r in tb.rows) rowsJson.put(JSONArray(r))
+            tabArr.put(JSONObject().apply {
+                put("title", tb.title)
+                put("page", tb.page)
+                put("headers", JSONArray(tb.headers))
+                put("rows", rowsJson)
+            })
+        }
+        root.put("tables", tabArr)
+
+        val figArr = JSONArray()
+        for (fg in analysis.figures) {
+            figArr.put(JSONObject().apply {
+                put("caption", fg.caption)
+                put("page", fg.page)
+                put("imagePath", fg.imagePath)
+            })
+        }
+        root.put("figures", figArr)
+
+        val diagArr = JSONArray()
+        for (dg in analysis.diagrams) {
+            diagArr.put(JSONObject().apply {
+                put("title", dg.title)
+                put("kind", dg.kind)
+                put("nodes", JSONArray(dg.nodes))
+            })
+        }
+        root.put("diagrams", diagArr)
 
         return root.toString()
     }
@@ -834,50 +1408,260 @@ object KuliahVaultEngine {
     fun parseAnalysisJson(raw: String): TextAnalysisResult {
         return try {
             val root = JSONObject(raw)
+            val schemaVersion = root.optInt("schemaVersion", 1)
+            val summary = mutableListOf<String>()
             val sumArr = root.optJSONArray("summary") ?: JSONArray()
-            val summary = (0 until sumArr.length()).map { sumArr.getString(it) }
+            for (i in 0 until sumArr.length()) summary.add(sumArr.getString(i))
 
-            val defArr = root.optJSONArray("definitions") ?: JSONArray()
-            val defs = (0 until defArr.length()).map {
-                val o = defArr.getJSONObject(it)
-                o.optString("term") to o.optString("desc")
-            }
-
-            val formArr = root.optJSONArray("formulas") ?: JSONArray()
-            val forms = (0 until formArr.length()).map {
-                val o = formArr.getJSONObject(it)
-                o.optString("label") to o.optString("expr")
-            }
-
-            val fDetArr = root.optJSONArray("formulaDetails") ?: JSONArray()
-            val fDetails = if (fDetArr.length() > 0) {
-                (0 until fDetArr.length()).map {
-                    val o = fDetArr.getJSONObject(it)
-                    FormulaItem(o.optString("label"), o.optString("expr"), o.optString("notes"))
-                }
-            } else {
-                forms.map { FormulaItem(it.first, it.second, "") }
-            }
-
+            val sections = mutableListOf<SectionBlock>()
             val secArr = root.optJSONArray("sections") ?: JSONArray()
-            val sections = (0 until secArr.length()).map {
-                val o = secArr.getJSONObject(it)
+            for (i in 0 until secArr.length()) {
+                val o = secArr.getJSONObject(i)
+                val bullets = mutableListOf<String>()
                 val bArr = o.optJSONArray("bullets") ?: JSONArray()
-                val bullets = (0 until bArr.length()).map { bi -> bArr.getString(bi) }
-                StudySection(o.optString("heading"), bullets, o.optString("body"))
+                for (j in 0 until bArr.length()) bullets.add(bArr.getString(j))
+                sections.add(SectionBlock(o.optString("heading"), bullets, o.optString("body"), o.optInt("page", 1)))
             }
 
-            TextAnalysisResult(summary, defs, forms, fDetails, sections)
+            val defs = mutableListOf<Pair<String, String>>()
+            val defArr = root.optJSONArray("definitions") ?: JSONArray()
+            for (i in 0 until defArr.length()) {
+                val o = defArr.getJSONObject(i)
+                defs.add(o.optString("term") to o.optString("desc"))
+            }
+
+            val fDetails = mutableListOf<FormulaItem>()
+            val fArr = root.optJSONArray("formulas") ?: JSONArray()
+            for (i in 0 until fArr.length()) {
+                val o = fArr.getJSONObject(i)
+                fDetails.add(FormulaItem(o.optString("label"), o.optString("expression"), o.optString("variableNotes")))
+            }
+
+            val tables = mutableListOf<ExtractedTable>()
+            val tabArr = root.optJSONArray("tables") ?: JSONArray()
+            for (i in 0 until tabArr.length()) {
+                val o = tabArr.getJSONObject(i)
+                val hArr = o.optJSONArray("headers") ?: JSONArray()
+                val headers = (0 until hArr.length()).map { hArr.getString(it) }
+                val rArr = o.optJSONArray("rows") ?: JSONArray()
+                val rows = (0 until rArr.length()).map { rIdx ->
+                    val cellArr = rArr.getJSONArray(rIdx)
+                    (0 until cellArr.length()).map { cIdx -> cellArr.getString(cIdx) }
+                }
+                tables.add(ExtractedTable(o.optString("title"), o.optInt("page", 1), headers, rows))
+            }
+
+            val figures = mutableListOf<ExtractedFigure>()
+            val figArr = root.optJSONArray("figures") ?: JSONArray()
+            for (i in 0 until figArr.length()) {
+                val o = figArr.getJSONObject(i)
+                figures.add(ExtractedFigure(o.optString("caption"), o.optInt("page", 1), o.optString("imagePath")))
+            }
+
+            val diagrams = mutableListOf<ProceduralDiagram>()
+            val diagArr = root.optJSONArray("diagrams") ?: JSONArray()
+            for (i in 0 until diagArr.length()) {
+                val o = diagArr.getJSONObject(i)
+                val nArr = o.optJSONArray("nodes") ?: JSONArray()
+                val nodes = (0 until nArr.length()).map { nArr.getString(it) }
+                diagrams.add(ProceduralDiagram(o.optString("title"), o.optString("kind"), nodes))
+            }
+
+            TextAnalysisResult(
+                summary = summary,
+                sections = sections,
+                definitions = defs,
+                formulas = fDetails.map { it.label to it.expression },
+                formulaDetails = fDetails,
+                tables = tables,
+                figures = figures,
+                diagrams = diagrams,
+                schemaVersion = schemaVersion
+            )
         } catch (_: Exception) {
-            TextAnalysisResult(emptyList(), emptyList(), emptyList())
+            TextAnalysisResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList())
         }
     }
 
-    // ==================== 3. WHITEBOARD ILLUMINATION NORMALIZATION & SPATIAL OCR ====================
+    // ==================== ANTI-GLARE WHITEBOARD ENHANCEMENT & OCR ====================
 
-    fun importFileToInternalStorage(context: Context, sourceUri: Uri, subFolder: String, prefix: String, ext: String): File {
-        val dir = File(context.filesDir, "kuliahvault/$subFolder").apply { mkdirs() }
-        val safePrefix = prefix.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(32)
+    fun enhanceWhiteboard(context: Context, sourceUri: Uri): File {
+        val raw = loadOrientedBitmap(context, sourceUri, 2000)
+            ?: throw IllegalStateException("Gagal memuat gambar papan tulis")
+
+        val w = raw.width
+        val h = raw.height
+        val pixels = IntArray(w * h)
+        raw.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val luma = IntArray(w * h)
+        for (i in pixels.indices) {
+            val c = pixels[i]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            luma[i] = (r * 77 + g * 150 + b * 29) shr 8
+        }
+
+        val grid = 32
+        val gw = (w + grid - 1) / grid
+        val gh = (h + grid - 1) / grid
+        val bgGrid = IntArray(gw * gh)
+        for (gy in 0 until gh) {
+            for (gx in 0 until gw) {
+                var p90 = 220
+                val samples = IntArray(64)
+                var count = 0
+                val startY = gy * grid
+                val startX = gx * grid
+                for (dy in 0 until grid step 4) {
+                    val py = (startY + dy).coerceAtMost(h - 1)
+                    for (dx in 0 until grid step 4) {
+                        val px = (startX + dx).coerceAtMost(w - 1)
+                        if (count < 64) samples[count++] = luma[py * w + px]
+                    }
+                }
+                if (count > 0) {
+                    samples.sort(0, count)
+                    p90 = samples[(count * 85) / 100].coerceAtLeast(90)
+                }
+                bgGrid[gy * gw + gx] = p90
+            }
+        }
+
+        val outPixels = IntArray(w * h)
+        for (y in 0 until h) {
+            val gy = (y / grid).coerceAtMost(gh - 1)
+            val rowOffset = y * w
+            for (x in 0 until w) {
+                val idx = rowOffset + x
+                val gx = (x / grid).coerceAtMost(gw - 1)
+                val bg = bgGrid[gy * gw + gx]
+                val c = pixels[idx]
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+
+                val nr = ((r * 255) / bg).coerceIn(0, 255)
+                val ng = ((g * 255) / bg).coerceIn(0, 255)
+                val nb = ((b * 255) / bg).coerceIn(0, 255)
+                val normLuma = (nr * 77 + ng * 150 + nb * 29) shr 8
+
+                outPixels[idx] = if (normLuma > 214) {
+                    Color.rgb(252, 253, 255)
+                } else {
+                    val dr = ((nr - 128) * 1.45f + 115f).toInt().coerceIn(0, 255)
+                    val dg = ((ng - 128) * 1.45f + 115f).toInt().coerceIn(0, 255)
+                    val db = ((nb - 128) * 1.45f + 115f).toInt().coerceIn(0, 255)
+                    Color.rgb(dr, dg, db)
+                }
+            }
+        }
+
+        val outBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        outBmp.setPixels(outPixels, 0, w, 0, 0, w, h)
+        raw.recycle()
+
+        val dir = File(context.filesDir, "kuliahvault/papan").apply { mkdirs() }
+        val outFile = File(dir, "board_sharp_${System.currentTimeMillis()}.jpg")
+        FileOutputStream(outFile).use { fos ->
+            outBmp.compress(Bitmap.CompressFormat.JPEG, 92, fos)
+        }
+        outBmp.recycle()
+        return outFile
+    }
+
+    private fun loadOrientedBitmap(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        val largest = max(opts.outWidth, opts.outHeight).coerceAtLeast(1)
+        var sample = 1
+        while (largest / sample > maxDim) sample *= 2
+
+        val decOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decOpts) }
+            ?: return null
+
+        val orientation = try {
+            context.contentResolver.openInputStream(uri)?.use {
+                ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        } catch (_: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            else -> return bmp
+        }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+        if (rotated != bmp) bmp.recycle()
+        return rotated
+    }
+
+    fun recognizeImageText(context: Context, uri: Uri, callback: (Boolean, String) -> Unit) {
+        try {
+            val image = InputImage.fromFilePath(context, uri)
+            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            recognizer.process(image)
+                .addOnSuccessListener { result ->
+                    val structuredLines = mutableListOf<Pair<Int, String>>()
+                    for (block in result.textBlocks) {
+                        for (line in block.lines) {
+                            val top = line.boundingBox?.top ?: 0
+                            val txt = line.text.trim()
+                            if (txt.isNotEmpty()) structuredLines.add(top to txt)
+                        }
+                    }
+                    val finalText = if (structuredLines.isNotEmpty()) {
+                        structuredLines.sortedBy { it.first }.joinToString("\n") { it.second }
+                    } else {
+                        result.text.trim()
+                    }
+                    callback(true, finalText)
+                }
+                .addOnFailureListener {
+                    callback(false, "")
+                }
+        } catch (_: Exception) {
+            callback(false, "")
+        }
+    }
+
+    private fun recognizeBitmapSync(bitmap: Bitmap): String {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var textOut = ""
+        try {
+            val image = InputImage.fromBitmap(bitmap, 0)
+            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            recognizer.process(image)
+                .addOnSuccessListener { res ->
+                    textOut = res.text.trim()
+                    latch.countDown()
+                }
+                .addOnFailureListener {
+                    latch.countDown()
+                }
+            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: Exception) {
+        }
+        return textOut
+    }
+
+    // ==================== STORAGE & EXPORT DOSSIER PDF ====================
+
+    fun importFileToInternalStorage(
+        context: Context,
+        sourceUri: Uri,
+        subDir: String,
+        prefix: String,
+        ext: String
+    ): File {
+        val dir = File(context.filesDir, "kuliahvault/$subDir").apply { mkdirs() }
+        val safePrefix = prefix.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(36)
         val outFile = File(dir, "${safePrefix}_${System.currentTimeMillis()}.$ext")
         context.contentResolver.openInputStream(sourceUri)?.use { input ->
             FileOutputStream(outFile).use { output ->
@@ -887,173 +1671,13 @@ object KuliahVaultEngine {
         return outFile
     }
 
-    fun enhanceWhiteboard(context: Context, sourceUri: Uri): File {
-        val dir = File(context.filesDir, "kuliahvault/papan").apply { mkdirs() }
-        val outFile = File(dir, "scan_tajam_${System.currentTimeMillis()}.jpg")
-        val raw = context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it) }
-            ?: throw IllegalStateException("Gagal memuat gambar")
-
-        val maxDim = 1920
-        val scale = if (raw.width > maxDim || raw.height > maxDim) {
-            maxDim.toFloat() / max(raw.width, raw.height).toFloat()
-        } else 1f
-        val bmp = if (scale < 1f) {
-            Bitmap.createScaledBitmap(raw, (raw.width * scale).toInt(), (raw.height * scale).toInt(), true)
-        } else raw
-
-        val normalized = normalizeIlluminationBitmap(bmp)
-        FileOutputStream(outFile).use { fos ->
-            normalized.compress(Bitmap.CompressFormat.JPEG, 92, fos)
-        }
-        if (normalized !== bmp) normalized.recycle()
-        if (bmp !== raw) bmp.recycle()
-        raw.recycle()
-        return outFile
-    }
-
-    /**
-     * Menghapus pantulan lampu kelas & bayangan tidak merata pada papan tulis
-     * menggunakan Background Illumination Division (L / B * 248 + S-Curve).
-     */
-    private fun normalizeIlluminationBitmap(src: Bitmap): Bitmap {
-        val w = src.width
-        val h = src.height
-        val total = w * h
-        val pixels = IntArray(total)
-        src.getPixels(pixels, 0, w, 0, 0, w, h)
-
-        val lum = IntArray(total)
-        for (i in 0 until total) {
-            val c = pixels[i]
-            val r = (c shr 16) and 0xFF
-            val g = (c shr 8) and 0xFF
-            val b = c and 0xFF
-            lum[i] = (r * 77 + g * 150 + b * 29) shr 8
-        }
-
-        // Buat peta pencahayaan latar (downsampled ~1/16 lalu box-blur 2 pass)
-        val ds = 16
-        val bw = (w / ds).coerceAtLeast(4)
-        val bh = (h / ds).coerceAtLeast(4)
-        var bg = IntArray(bw * bh)
-        for (by in 0 until bh) {
-            val sy = (by * ds + ds / 2).coerceAtMost(h - 1)
-            for (bx in 0 until bw) {
-                val sx = (bx * ds + ds / 2).coerceAtMost(w - 1)
-                bg[by * bw + bx] = lum[sy * w + sx]
-            }
-        }
-        repeat(2) {
-            val tmp = IntArray(bw * bh)
-            for (y in 0 until bh) {
-                for (x in 0 until bw) {
-                    var sum = 0
-                    var cnt = 0
-                    for (dy in -2..2) {
-                        val ny = y + dy
-                        if (ny in 0 until bh) {
-                            for (dx in -2..2) {
-                                val nx = x + dx
-                                if (nx in 0 until bw) {
-                                    sum += bg[ny * bw + nx]
-                                    cnt++
-                                }
-                            }
-                        }
-                    }
-                    tmp[y * bw + x] = sum / max(cnt, 1)
-                }
-            }
-            bg = tmp
-        }
-
-        // Bagi luminansi piksel dengan peta pencahayaan latar + perkuat kontras tinta spidol
-        for (y in 0 until h) {
-            val by = (y / ds).coerceIn(0, bh - 1)
-            for (x in 0 until w) {
-                val bx = (x / ds).coerceIn(0, bw - 1)
-                val bgVal = bg[by * bw + bx].coerceAtLeast(45)
-                val idx = y * w + x
-                val ratio = (lum[idx].toFloat() / bgVal.toFloat()).coerceIn(0f, 1.35f)
-                // Kurva S-stretch: tinta spidol (< 0.78) dipekatkan, papan (> 0.90) diputihkan
-                val stretched = when {
-                    ratio < 0.72f -> (ratio * 0.45f)
-                    ratio > 0.91f -> 1.0f
-                    else -> ((ratio - 0.72f) / 0.19f).pow(1.35f)
-                }
-                val v = (stretched * 255f).roundToInt().coerceIn(0, 255)
-                pixels[idx] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-            }
-        }
-
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        out.setPixels(pixels, 0, w, 0, 0, w, h)
-        return out
-    }
-
-    fun recognizeImageText(context: Context, imageUri: Uri, onResult: (Boolean, String) -> Unit) {
-        try {
-            val image = InputImage.fromFilePath(context, imageUri)
-            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-            recognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    recognizer.close()
-                    onResult(true, formatSortedVisionText(visionText))
-                }
-                .addOnFailureListener {
-                    recognizer.close()
-                    onResult(false, "")
-                }
-        } catch (_: Exception) {
-            onResult(false, "")
-        }
-    }
-
-    private fun formatSortedVisionText(visionText: Text): String {
-        val allLines = mutableListOf<Text.Line>()
-        for (block in visionText.textBlocks) {
-            allLines.addAll(block.lines)
-        }
-        if (allLines.isEmpty()) return visionText.text.trim()
-
-        allLines.sortWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
-
-        val rows = mutableListOf<MutableList<Text.Line>>()
-        for (ln in allLines) {
-            val box = ln.boundingBox
-            if (box == null || rows.isEmpty()) {
-                rows.add(mutableListOf(ln))
-                continue
-            }
-            val lastRow = rows.last()
-            val refBox = lastRow.first().boundingBox
-            if (refBox != null) {
-                val refCenterY = (refBox.top + refBox.bottom) / 2
-                val curCenterY = (box.top + box.bottom) / 2
-                val tolerance = max(refBox.height(), box.height()) * 0.55f
-                if (abs(curCenterY - refCenterY) <= tolerance) {
-                    lastRow.add(ln)
-                    continue
-                }
-            }
-            rows.add(mutableListOf(ln))
-        }
-
-        return rows.joinToString("\n") { row ->
-            row.sortBy { it.boundingBox?.left ?: 0 }
-            row.joinToString("   ") { it.text.trim() }
-        }.trim()
-    }
-
-    // ==================== 4. SEARCH SNIPPET & DOSSIER PDF EXPORT ====================
-
     fun makeSnippet(text: String, lowerQuery: String): String {
-        val clean = text.replace("[BAB] ", "").replace(Regex("\\s+"), " ").trim()
-        if (clean.isEmpty()) return "-"
+        val clean = text.replace(Regex("\\s+"), " ").trim()
+        if (clean.isEmpty()) return ""
         val idx = clean.lowercase().indexOf(lowerQuery)
-        if (idx < 0) return clean.take(110) + if (clean.length > 110) "..." else ""
-        val start = (idx - 38).coerceAtLeast(0)
-        val end = (idx + lowerQuery.length + 68).coerceAtMost(clean.length)
+        if (idx < 0) return clean.take(120) + if (clean.length > 120) "..." else ""
+        val start = (idx - 42).coerceAtLeast(0)
+        val end = (idx + lowerQuery.length + 72).coerceAtMost(clean.length)
         val prefix = if (start > 0) "..." else ""
         val suffix = if (end < clean.length) "..." else ""
         return prefix + clean.substring(start, end) + suffix
@@ -1067,8 +1691,6 @@ object KuliahVaultEngine {
     ): File {
         val course = courseByKey(courseKey)
         val (pdfs, recs, boards) = db.getVaultMeetingMaterial(courseKey, dateKey)
-        val formulas = db.listVaultFormulas(courseKey)
-
         val pdf = PdfDocument()
         val pageWidth = 595
         val pageHeight = 842
@@ -1076,34 +1698,29 @@ object KuliahVaultEngine {
         var page = pdf.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNum).create())
         var canvas = page.canvas
 
-        val bannerPaint = Paint().apply { color = Color.parseColor("#312E81") }
+        val bannerPaint = Paint().apply { color = Color.parseColor("#1E1B4B") }
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
-            textSize = 17f
+            textSize = 16f
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
         val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#E0E7FF")
-            textSize = 10.5f
+            color = Color.parseColor("#C7D2FE")
+            textSize = 10f
         }
         val secPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#1E1B4B")
-            textSize = 12.5f
+            color = Color.parseColor("#312E81")
+            textSize = 12f
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
         val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#1E293B")
             textSize = 10f
         }
-        val monoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#92400E")
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-        }
 
         canvas.drawRoundRect(RectF(32f, 32f, (pageWidth - 32).toFloat(), 106f), 14f, 14f, bannerPaint)
-        canvas.drawText("DOSSIER PERTEMUAN KULIAH", 48f, 62f, titlePaint)
-        canvas.drawText("${course.name} • Tanggal: $dateKey • AbsenGuard × KuliahVault IE", 48f, 84f, subPaint)
+        canvas.drawText("DOSSIER MATERI PERTEMUAN", 48f, 62f, titlePaint)
+        canvas.drawText("${course.name} • Tanggal $dateKey • AbsenGuard × KuliahVault IE", 48f, 84f, subPaint)
 
         var y = 132f
         fun ensureSpace(needed: Float) {
@@ -1118,74 +1735,72 @@ object KuliahVaultEngine {
 
         fun drawWrapped(text: String, paint: Paint, indent: Float = 38f) {
             val maxChars = 84
-            val clean = text.replace("[BAB] ", "").replace(Regex("\\s+"), " ").trim()
+            val clean = text.replace(Regex("\\s+"), " ").trim()
             var i = 0
             while (i < clean.length) {
                 val end = (i + maxChars).coerceAtMost(clean.length)
-                val slice = clean.substring(i, end)
                 ensureSpace(16f)
-                canvas.drawText(slice, indent, y, paint)
+                canvas.drawText(clean.substring(i, end), indent, y, paint)
                 y += 15f
                 i = end
             }
         }
 
         ensureSpace(24f)
-        canvas.drawText("1. INTISARI MATERI PDF (${pdfs.size} DOKUMEN)", 36f, y, secPaint)
+        canvas.drawText("1. RINGKASAN MATERI PDF (${pdfs.size} Dokumen)", 36f, y, secPaint)
         y += 18f
         if (pdfs.isEmpty()) {
-            drawWrapped("- Tidak ada PDF diunggah pada tanggal ini.", bodyPaint)
+            drawWrapped("Tidak ada PDF pada tanggal ini.", bodyPaint)
         } else {
-            pdfs.forEach { p ->
-                val fullPdf = db.getVaultPdf(p.id) ?: p
-                val analysis = parseAnalysisJson(fullPdf.analysisJson)
-                drawWrapped("• ${fullPdf.title} (${fullPdf.pageCount} hal)", secPaint)
-                analysis.summary.forEach { s -> drawWrapped("  - $s", bodyPaint, 46f) }
-                y += 6f
+            for (p in pdfs) {
+                drawWrapped("• ${p.title} (${p.pageCount} halaman)", bodyPaint)
+                val an = parseAnalysisJson(p.analysisJson)
+                an.summary.take(3).forEach { s -> drawWrapped("   - $s", bodyPaint, 48f) }
             }
         }
+        y += 10f
 
-        y += 12f
         ensureSpace(24f)
-        canvas.drawText("2. BANK RUMUS MATA KULIAH (${formulas.size} RUMUS)", 36f, y, secPaint)
-        y += 18f
-        if (formulas.isEmpty()) {
-            drawWrapped("- Belum ada rumus tersimpan.", bodyPaint)
-        } else {
-            formulas.forEach { f ->
-                drawWrapped("• ${f.title}: ${f.expression}", monoPaint)
-                if (f.notes.isNotBlank()) drawWrapped("  Ket: ${f.notes}", bodyPaint, 46f)
-            }
-        }
-
-        y += 12f
-        ensureSpace(24f)
-        canvas.drawText("3. CATATAN PAPAN TULIS OCR (${boards.size} FOTO)", 36f, y, secPaint)
-        y += 18f
-        if (boards.isEmpty()) {
-            drawWrapped("- Tidak ada scan papan tulis pada tanggal ini.", bodyPaint)
-        } else {
-            boards.forEachIndexed { idx, b ->
-                drawWrapped("• Papan #${idx + 1}: ${b.ocrText.ifBlank { "(Tanpa teks)" }}", bodyPaint)
-            }
-        }
-
-        y += 12f
-        ensureSpace(24f)
-        canvas.drawText("4. TRANSKRIP REKAMAN DOSEN (${recs.size} SESI)", 36f, y, secPaint)
+        canvas.drawText("2. TRANSKRIP REKAMAN DOSEN (${recs.size} Sesi)", 36f, y, secPaint)
         y += 18f
         if (recs.isEmpty()) {
-            drawWrapped("- Tidak ada rekaman dosen pada tanggal ini.", bodyPaint)
+            drawWrapped("Tidak ada rekaman suara pada tanggal ini.", bodyPaint)
         } else {
-            recs.forEach { r ->
-                drawWrapped("• ${r.title}: ${r.transcriptText.ifBlank { "(Mode Audio HD)" }}", bodyPaint)
+            for (r in recs) {
+                drawWrapped("• ${r.title}", bodyPaint)
+                val snippet = r.transcriptText.ifBlank { "(Rekaman audio tanpa transkrip)" }
+                drawWrapped("   $snippet", bodyPaint, 48f)
+            }
+        }
+        y += 10f
+
+        ensureSpace(24f)
+        canvas.drawText("3. CATATAN PAPAN TULIS & OCR (${boards.size} Foto)", 36f, y, secPaint)
+        y += 18f
+        if (boards.isEmpty()) {
+            drawWrapped("Tidak ada foto papan tulis pada tanggal ini.", bodyPaint)
+        } else {
+            for (b in boards) {
+                val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(b.createdAt))
+                drawWrapped("• Papan Tulis ($timeStr): ${b.ocrText.ifBlank { "Tanpa teks OCR" }}", bodyPaint)
+                val imgFile = File(b.imageUri)
+                if (imgFile.exists()) {
+                    val bmp = BitmapFactory.decodeFile(imgFile.absolutePath)
+                    if (bmp != null) {
+                        val targetW = 240f
+                        val targetH = (bmp.height * (targetW / bmp.width.coerceAtLeast(1))).coerceAtMost(150f)
+                        ensureSpace(targetH + 14f)
+                        canvas.drawBitmap(bmp, null, RectF(44f, y, 44f + targetW, y + targetH), null)
+                        y += targetH + 12f
+                        bmp.recycle()
+                    }
+                }
             }
         }
 
         pdf.finishPage(page)
         val outDir = File(context.cacheDir, "pdfs").apply { mkdirs() }
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-        val outFile = File(outDir, "Dossier_${courseKey}_${dateKey}_$stamp.pdf")
+        val outFile = File(outDir, "Dossier_${courseKey}_$dateKey.pdf")
         FileOutputStream(outFile).use { pdf.writeTo(it) }
         pdf.close()
         return outFile
