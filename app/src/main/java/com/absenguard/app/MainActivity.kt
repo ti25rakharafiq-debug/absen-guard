@@ -19,8 +19,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
@@ -41,6 +41,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -49,16 +50,22 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var db: ScheduleDbHelper
+    private lateinit var auroraView: AuroraMeshView
     private lateinit var rootContainer: FrameLayout
     private lateinit var mainContent: LinearLayout
     private lateinit var permissionCard: LinearLayout
-    private lateinit var nextClassCard: LinearLayout
+    private lateinit var nextClassCard: FrameLayout
     private lateinit var nextClassTitle: TextView
     private lateinit var nextClassMeta: TextView
     private lateinit var nextClassCountdown: TextView
+    private lateinit var nextClassOpenBtn: TextView
+    private lateinit var filterScroll: HorizontalScrollView
+    private lateinit var filterPillIndicator: View
     private lateinit var filterRow: LinearLayout
     private lateinit var scheduleListContainer: LinearLayout
+    private val dayChips = mutableMapOf<Int, TextView>()
     private var selectedDayFilter = 0
+    private var currentNextSchedule: CourseSchedule? = null
     private val handler = Handler(Looper.getMainLooper())
 
     private val ringtonePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -88,15 +95,25 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         db = ScheduleDbHelper(this)
-        applyDarkMode()
+        applySystemBars()
 
-        rootContainer = FrameLayout(this).apply {
-            background = gradient(paletteBg())
+        rootContainer = FrameLayout(this)
+        auroraView = AuroraMeshView(this) { isDarkMode() }
+        rootContainer.addView(
+            auroraView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_ALWAYS
         }
-        val scrollView = ScrollView(this).apply { isFillViewport = true }
         mainContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(88))
+            setPadding(dp(16), dp(14), dp(16), dp(96))
         }
         buildHeader()
         buildPermissionCard()
@@ -113,18 +130,24 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-            setPadding(dp(20), dp(12), dp(20), dp(12))
-            background = gradient("#5B6AD0", radius = dp(26).toFloat())
+            setTextColor(paletteLightText())
+            setPadding(dp(22), dp(13), dp(22), dp(13))
+            background = LiquidGlassKit.pillGlassSurface(
+                this@MainActivity,
+                "#E64338CA",
+                "#A6F8FAFC",
+                28f
+            )
+            LiquidGlassKit.applyGlassElevation(this, 10f, isDarkMode())
             setOnClickListener { showScheduleEditorDialog(null) }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this, 0.94f)
         }
         val fabParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.END
-            setMargins(dp(16), dp(16), dp(16), dp(20))
+            setMargins(dp(16), dp(16), dp(16), dp(22))
         }
         rootContainer.addView(fab, fabParams)
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
@@ -140,7 +163,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        auroraView.startMotion()
         refreshAll()
+    }
+
+    override fun onPause() {
+        auroraView.stopMotion()
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -151,32 +180,42 @@ class MainActivity : AppCompatActivity() {
     private fun refreshAll() {
         updatePermissionVisibility()
         updateNextClassBanner()
-        renderFilterChips()
+        updateFilterPillSelection(animate = false)
         renderScheduleCards()
         AlarmScheduler.scheduleAll(this)
         NextClassWidgetProvider.updateAllWidgets(this)
     }
 
     private fun buildHeader() {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         val titleCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         titleCol.addView(TextView(this).apply {
             text = "AbsenGuard"
-            textSize = 22f
+            textSize = 24f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteText())
         })
         titleCol.addView(TextView(this).apply {
-            text = "Pengingat Absen E-Learning UBP"
+            text = "E-Learning UBP • Liquid Glass"
             textSize = 12f
             setTextColor(paletteSubtext())
         })
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        buttons.addView(headerButton(if (isDarkMode()) "Cerah" else "Gelap") {
+            db.setSetting("dark_mode", if (isDarkMode()) "0" else "1")
+            recreate()
+        })
         buttons.addView(headerButton("Riwayat") { showHistoryDialog() })
-        buttons.addView(headerButton("Pengaturan") { showSettingsDialog() })
+        buttons.addView(headerButton("Setelan") { showSettingsDialog() })
         row.addView(titleCol)
         row.addView(buttons)
         mainContent.addView(row)
@@ -190,28 +229,40 @@ class MainActivity : AppCompatActivity() {
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteText())
-            setPadding(dp(10), dp(7), dp(10), dp(7))
-            background = gradient(paletteCard(), paletteBorder(), dp(18).toFloat())
+            setPadding(dp(11), dp(7), dp(11), dp(7))
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 18f)
+            LiquidGlassKit.applyGlassElevation(this, 3f, isDarkMode())
             setOnClickListener { action() }
-            attachSpringPress(this)
-        }.also { it.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)).apply { marginStart = dp(6) } }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }.also {
+            it.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(36)
+            ).apply { marginStart = dp(6) }
+        }
     }
 
     private fun buildPermissionCard() {
         permissionCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = gradient("#FEE2E2", "#DC2626", dp(18).toFloat())
+            background = LiquidGlassKit.glassSurface(
+                this@MainActivity,
+                isDarkMode(),
+                22f,
+                if (isDarkMode()) "#4D991B1B" else "#D9FEE2E2"
+            )
+            LiquidGlassKit.applyGlassElevation(this, 4f, isDarkMode())
         }
         permissionCard.addView(TextView(this).apply {
             text = "Izin Alarm & Notifikasi Sistem Belum Lengkap"
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#DC2626"))
+            setTextColor(Color.parseColor(if (isDarkMode()) "#FCA5A5" else "#DC2626"))
         })
         permissionCard.addView(space(4))
         permissionCard.addView(TextView(this).apply {
-            text = "Aktifkan izin notifikasi, alarm presisi, dan bebas hemat baterai."
+            text = "Aktifkan izin notifikasi, alarm presisi, dan bebas hemat baterai agar dering selalu tepat waktu."
             textSize = 12f
             setTextColor(paletteText())
         })
@@ -220,10 +271,10 @@ class MainActivity : AppCompatActivity() {
             text = "Izinkan Sekarang"
             isAllCaps = false
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-            background = gradient("#DC2626", radius = dp(18).toFloat())
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#DC2626", "#99F8FAFC", 18f)
             setOnClickListener { requestMissingPermissions() }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this)
         }
         permissionCard.addView(button)
         mainContent.addView(permissionCard)
@@ -275,46 +326,87 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildNextClassCard() {
-        nextClassCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = gradient("#5B6AD0", radius = dp(20).toFloat())
+        nextClassCard = FrameLayout(this).apply {
+            background = LiquidGlassKit.heroGlassSurface(this@MainActivity, 26f)
+            LiquidGlassKit.applyGlassElevation(this, 10f, isDarkMode())
+            LiquidGlassKit.attachLiquidTouch(this, 0.98f)
         }
-        nextClassCard.addView(TextView(this).apply {
+
+        val shimmer = GlassShimmerOverlay(this)
+        nextClassCard.addView(
+            shimmer,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+        }
+
+        val topTagRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val tagPill = TextView(this).apply {
             text = "JADWAL KULIAH TERDEKAT"
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#33F8FAFC", "#80F8FAFC", 12f)
+        }
+        topTagRow.addView(tagPill)
+        topTagRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+
+        nextClassOpenBtn = TextView(this).apply {
+            text = "Buka Kelas →"
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-        })
-        nextClassCard.addView(space(4))
+            setTextColor(paletteLightText())
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#4DF8FAFC", "#B3F8FAFC", 14f)
+            setOnClickListener { openCoursePortal(currentNextSchedule) }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }
+        topTagRow.addView(nextClassOpenBtn)
+
         nextClassTitle = TextView(this).apply {
             text = "Memuat..."
-            textSize = 17f
+            textSize = 19f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
+            setTextColor(paletteLightText())
         }
         nextClassMeta = TextView(this).apply {
             text = "-"
             textSize = 12f
-            setTextColor(paletteWhite())
+            setTextColor(Color.parseColor("#E0E7FF"))
         }
         nextClassCountdown = TextView(this).apply {
             text = "00:00:00"
-            textSize = 24f
+            textSize = 25f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
+            setTextColor(paletteLightText())
         }
-        nextClassCard.addView(nextClassTitle)
-        nextClassCard.addView(space(2))
-        nextClassCard.addView(nextClassMeta)
-        nextClassCard.addView(space(8))
-        nextClassCard.addView(nextClassCountdown)
+
+        content.addView(topTagRow)
+        content.addView(space(8))
+        content.addView(nextClassTitle)
+        content.addView(space(3))
+        content.addView(nextClassMeta)
+        content.addView(space(10))
+        content.addView(nextClassCountdown)
+
+        nextClassCard.addView(content)
         mainContent.addView(nextClassCard)
         mainContent.addView(space(14))
     }
 
     private fun updateNextClassBanner() {
         val next = AlarmScheduler.getNextUpcomingSchedule(this)
+        currentNextSchedule = next?.first
         if (next == null) {
             nextClassTitle.text = "Belum ada jadwal aktif"
             nextClassMeta.text = "Tambahkan atau aktifkan jadwal kuliah"
@@ -351,8 +443,9 @@ class MainActivity : AppCompatActivity() {
     private fun buildControlCard() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = gradient(paletteCard(), paletteBorder(), dp(20).toFloat())
+            setPadding(dp(16), dp(15), dp(16), dp(15))
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 24f)
+            LiquidGlassKit.applyGlassElevation(this, 6f, isDarkMode())
         }
         card.addView(TextView(this).apply {
             text = "Mode Peringatan Global"
@@ -365,43 +458,44 @@ class MainActivity : AppCompatActivity() {
         card.addView(makeSwitchRow("Mode Getar HP", "global_vibrate", true))
         card.addView(makeSwitchRow("Mode Notifikasi Pop-up", "global_notif", true))
         card.addView(makeSwitchRow("Pengingat Persiapan H-10 Menit", "pre_reminder_10m", true))
-        card.addView(space(10))
+        card.addView(space(12))
+
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val test = Button(this).apply {
             text = "Tes Dering"
             isAllCaps = false
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-            background = gradient("#5B6AD0", radius = dp(18).toFloat())
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#4F46E5", "#99F8FAFC", 18f)
             setOnClickListener {
                 AlarmScheduler.triggerInstantTest(this@MainActivity)
                 Toast.makeText(this@MainActivity, "Tes alarm aktif 3 detik", Toast.LENGTH_SHORT).show()
             }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this)
         }
         val portal = Button(this).apply {
-            text = "Buka E-Learning"
+            text = "E-Learning"
             isAllCaps = false
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-            background = gradient("#2E8B57", radius = dp(18).toFloat())
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 18f)
             setOnClickListener {
                 val nextSchedule = AlarmScheduler.getNextUpcomingSchedule(this@MainActivity)?.first
                 openCoursePortal(nextSchedule)
             }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this)
         }
         val silent = Button(this).apply {
             text = getSilentButtonLabel()
             isAllCaps = false
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(paletteWhite())
-            background = gradient("#D97706", radius = dp(18).toFloat())
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#D97706", "#99F8FAFC", 18f)
             setOnClickListener { toggleSilentMode(this) }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this)
         }
         val p1 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4) }
         val p2 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4); marginEnd = dp(4) }
@@ -428,7 +522,7 @@ class MainActivity : AppCompatActivity() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         return if (nm.isNotificationPolicyAccessGranted && am.ringerMode == AudioManager.RINGER_MODE_VIBRATE) {
-            "Mode Hening ✓"
+            "Hening ✓"
         } else {
             "Mode Hening"
         }
@@ -457,7 +551,7 @@ class MainActivity : AppCompatActivity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(4))
+            setPadding(0, dp(5), 0, dp(5))
         }
         val text = TextView(this).apply {
             text = label
@@ -465,28 +559,45 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val switch = SwitchCompat(this).apply {
-            isChecked = db.getSetting(settingKey, if (defaultOn) "1" else "0") == "1"
-            setOnCheckedChangeListener { _, checked ->
-                db.setSetting(settingKey, if (checked) "1" else "0")
-                AlarmScheduler.scheduleAll(this@MainActivity)
-            }
+        val initial = db.getSetting(settingKey, if (defaultOn) "1" else "0") == "1"
+        val toggle = LiquidToggleSwitch(this, initial, isDarkMode()) { checked ->
+            db.setSetting(settingKey, if (checked) "1" else "0")
+            AlarmScheduler.scheduleAll(this@MainActivity)
         }
         row.addView(text)
-        row.addView(switch)
+        row.addView(toggle)
         return row
     }
 
     private fun buildFilterChips() {
-        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        scroll.addView(filterRow)
-        mainContent.addView(scroll)
-        mainContent.addView(space(12))
-    }
+        filterScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 24f, strongRim = false)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            LiquidGlassKit.applyGlassElevation(this, 4f, isDarkMode())
+        }
 
-    private fun renderFilterChips() {
-        filterRow.removeAllViews()
+        val trackFrame = FrameLayout(this)
+
+        filterPillIndicator = View(this).apply {
+            background = LiquidGlassKit.pillGlassSurface(
+                this@MainActivity,
+                "#4F46E5",
+                "#CCF8FAFC",
+                20f
+            )
+            LiquidGlassKit.applyGlassElevation(this, 4f, isDarkMode())
+        }
+        trackFrame.addView(
+            filterPillIndicator,
+            FrameLayout.LayoutParams(dp(72), FrameLayout.LayoutParams.MATCH_PARENT)
+        )
+
+        filterRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
         val items = listOf(
             0 to "Semua",
             Calendar.MONDAY to "Senin",
@@ -495,30 +606,84 @@ class MainActivity : AppCompatActivity() {
             Calendar.THURSDAY to "Kamis",
             Calendar.FRIDAY to "Jum'at"
         )
+        dayChips.clear()
         for ((day, label) in items) {
-            val active = selectedDayFilter == day
             val chip = TextView(this).apply {
                 text = label
                 textSize = 13f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(if (active) paletteWhite() else paletteText())
-                setPadding(dp(16), dp(8), dp(16), dp(8))
-                background = if (active) {
-                    gradient("#5B6AD0", radius = dp(18).toFloat())
-                } else {
-                    gradient(paletteCard(), paletteBorder(), dp(18).toFloat())
-                }
+                setTextColor(if (selectedDayFilter == day) paletteLightText() else paletteText())
+                setPadding(dp(16), dp(9), dp(16), dp(9))
+                gravity = Gravity.CENTER
                 setOnClickListener {
-                    selectedDayFilter = day
-                    renderFilterChips()
-                    renderScheduleCards()
+                    if (selectedDayFilter != day) {
+                        selectedDayFilter = day
+                        updateFilterPillSelection(animate = true)
+                        renderScheduleCards()
+                    }
                 }
-                attachSpringPress(this)
+                LiquidGlassKit.attachLiquidTouch(this, 0.94f)
             }
-            filterRow.addView(chip, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(8) })
+            dayChips[day] = chip
+            filterRow.addView(
+                chip,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = dp(4) }
+            )
+        }
+
+        trackFrame.addView(filterRow)
+        filterScroll.addView(trackFrame)
+        mainContent.addView(filterScroll)
+        mainContent.addView(space(14))
+
+        filterRow.post { updateFilterPillSelection(animate = false) }
+    }
+
+    private fun updateFilterPillSelection(animate: Boolean) {
+        for ((day, chip) in dayChips) {
+            chip.setTextColor(if (day == selectedDayFilter) paletteLightText() else paletteText())
+        }
+        val activeChip = dayChips[selectedDayFilter] ?: return
+        activeChip.post {
+            val targetX = activeChip.left.toFloat()
+            val targetW = activeChip.width
+            val targetH = activeChip.height
+            if (targetW <= 0 || targetH <= 0) return@post
+
+            val lp = filterPillIndicator.layoutParams as FrameLayout.LayoutParams
+            lp.height = targetH
+
+            if (!animate) {
+                lp.width = targetW
+                filterPillIndicator.layoutParams = lp
+                filterPillIndicator.translationX = targetX
+            } else {
+                val startX = filterPillIndicator.translationX
+                val startW = filterPillIndicator.width.takeIf { it > 0 } ?: targetW
+                filterPillIndicator.animate()
+                    .translationX(targetX)
+                    .setDuration(290L)
+                    .setInterpolator(OvershootInterpolator(1.15f))
+                    .start()
+
+                android.animation.ValueAnimator.ofInt(startW, targetW).apply {
+                    duration = 260L
+                    interpolator = DecelerateInterpolator()
+                    addUpdateListener { anim ->
+                        val params = filterPillIndicator.layoutParams as FrameLayout.LayoutParams
+                        params.width = anim.animatedValue as Int
+                        params.height = targetH
+                        filterPillIndicator.layoutParams = params
+                    }
+                    start()
+                }
+            }
+
+            val scrollTarget = (activeChip.left - (filterScroll.width - activeChip.width) / 2).coerceAtLeast(0)
+            filterScroll.smoothScrollTo(scrollTarget, 0)
         }
     }
 
@@ -526,26 +691,44 @@ class MainActivity : AppCompatActivity() {
         scheduleListContainer.removeAllViews()
         val schedules = if (selectedDayFilter == 0) db.getAllSchedules() else db.getSchedulesForDay(selectedDayFilter)
         if (schedules.isEmpty()) {
-            scheduleListContainer.addView(TextView(this).apply {
-                text = "Tidak ada jadwal pada hari ini."
+            val emptyBox = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(20), dp(28), dp(20), dp(28))
+                background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 22f)
+            }
+            emptyBox.addView(TextView(this).apply {
+                text = "Tidak ada jadwal kuliah pada hari ini."
                 textSize = 14f
                 setTextColor(paletteSubtext())
                 gravity = Gravity.CENTER
-                setPadding(dp(16), dp(24), dp(16), dp(24))
             })
+            scheduleListContainer.addView(emptyBox)
             return
         }
+
         schedules.forEachIndexed { index, schedule ->
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(14), dp(16), dp(14))
-                background = gradient(paletteCard(), paletteBorder(), dp(18).toFloat())
+                setPadding(dp(16), dp(15), dp(16), dp(15))
+                background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 24f)
+                LiquidGlassKit.applyGlassElevation(this, 6f, isDarkMode())
                 alpha = 0f
-                translationY = dp(24).toFloat()
-                animate().alpha(1f).translationY(0f).setDuration(220)
-                    .setStartDelay(index * 45L).setInterpolator(DecelerateInterpolator()).start()
-                attachSpringPress(this)
+                translationY = dp(22).toFloat()
+                scaleX = 0.97f
+                scaleY = 0.97f
+                animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(260L)
+                    .setStartDelay(index * 45L)
+                    .setInterpolator(DecelerateInterpolator())
+                    .start()
+                LiquidGlassKit.attachLiquidTouch(this, 0.985f)
             }
+
             val top = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -563,39 +746,98 @@ class MainActivity : AppCompatActivity() {
                 )
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(parseColor("#5B6AD0"))
+                setTextColor(Color.parseColor(if (isDarkMode()) "#93C5FD" else "#4338CA"))
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
+
             val online = schedule.classMode.equals("Online", ignoreCase = true)
             top.addView(TextView(this).apply {
                 text = if (online) "Online" else "Offline"
                 textSize = 11f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(paletteWhite())
-                setPadding(dp(10), dp(4), dp(10), dp(4))
-                background = gradient(if (online) "#D97706" else "#5B6AD0", radius = dp(12).toFloat())
+                setTextColor(paletteLightText())
+                setPadding(dp(11), dp(4), dp(11), dp(4))
+                background = LiquidGlassKit.pillGlassSurface(
+                    this@MainActivity,
+                    if (online) "#D97706" else "#4F46E5",
+                    "#80F8FAFC",
+                    12f
+                )
                 setOnClickListener {
                     db.updateSchedule(schedule.copy(classMode = if (online) "Offline" else "Online"))
                     refreshAll()
                 }
+                LiquidGlassKit.attachLiquidTouch(this)
             })
             card.addView(top)
             card.addView(space(6))
-            card.addView(TextView(this).apply {
+
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            titleRow.addView(TextView(this).apply {
                 text = schedule.courseName
                 textSize = 16f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(paletteText())
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
+            if (schedule.courseUrl.isNotBlank()) {
+                val isDirectAbsen = schedule.courseUrl.contains("/mod/attendance/")
+                titleRow.addView(TextView(this).apply {
+                    text = if (isDirectAbsen) "Direct Absen" else "Link Kelas"
+                    textSize = 10f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.parseColor(if (isDarkMode()) "#6EE7B7" else "#2E8B57"))
+                    setPadding(dp(8), dp(3), dp(8), dp(3))
+                    background = LiquidGlassKit.pillGlassSurface(
+                        this@MainActivity,
+                        if (isDarkMode()) "#2610B981" else "#242E8B57",
+                        if (isDarkMode()) "#666EE7B7" else "#662E8B57",
+                        10f
+                    )
+                })
+            }
+            card.addView(titleRow)
+            card.addView(space(6))
+
             val stats = db.getAttendanceStats(schedule.id)
             val percent = if (stats.second > 0) (stats.first * 100) / stats.second else 100
-            card.addView(TextView(this).apply {
+            val healthy = !(percent < 80 && stats.second > 0)
+            val accentHex = if (healthy) "#2E8B57" else "#DC2626"
+
+            val statsRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            statsRow.addView(TextView(this).apply {
                 text = "Kehadiran: ${stats.first}/${stats.second} ($percent%)"
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(parseColor(if (percent < 80 && stats.second > 0) "#DC2626" else "#2E8B57"))
+                setTextColor(Color.parseColor(if (isDarkMode() && healthy) "#6EE7B7" else accentHex))
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
-            card.addView(space(8))
+
+            val barTrack = FrameLayout(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor(if (isDarkMode()) "#334155" else "#CBD5E1"))
+                    cornerRadius = dp(6).toFloat()
+                }
+            }
+            val barFill = View(this).apply {
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor(accentHex))
+                    cornerRadius = dp(6).toFloat()
+                }
+            }
+            val fillWidth = (dp(76) * (percent.coerceIn(0, 100) / 100f)).toInt().coerceAtLeast(dp(6))
+            barTrack.addView(barFill, FrameLayout.LayoutParams(fillWidth, dp(6)))
+            statsRow.addView(barTrack, LinearLayout.LayoutParams(dp(76), dp(6)))
+            card.addView(statsRow)
+            card.addView(space(10))
+
+            val toggleScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
             val toggleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             toggleRow.addView(makeMiniToggle("Dering", schedule.ringEnabled) {
                 db.updateScheduleModes(schedule.id, !schedule.ringEnabled, schedule.vibrateEnabled, schedule.notifEnabled, schedule.active)
@@ -614,8 +856,9 @@ class MainActivity : AppCompatActivity() {
                 db.setSkipToday(schedule.id, !db.isSkippedToday(schedule.id))
                 refreshAll()
             })
-            card.addView(toggleRow)
-            card.addView(space(8))
+            toggleScroll.addView(toggleRow)
+            card.addView(toggleScroll)
+            card.addView(space(10))
 
             val actionRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -626,11 +869,11 @@ class MainActivity : AppCompatActivity() {
                 isAllCaps = false
                 textSize = 11f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(paletteWhite())
-                setPadding(dp(11), dp(5), dp(11), dp(5))
-                background = gradient("#5B6AD0", radius = dp(16).toFloat())
+                setTextColor(paletteLightText())
+                setPadding(dp(12), dp(5), dp(12), dp(5))
+                background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#4F46E5", "#99F8FAFC", 16f)
                 setOnClickListener { openCoursePortal(schedule) }
-                attachSpringPress(this)
+                LiquidGlassKit.attachLiquidTouch(this)
             }
             val attended = db.isAttendedToday(schedule.id)
             val checkIn = Button(this).apply {
@@ -638,40 +881,50 @@ class MainActivity : AppCompatActivity() {
                 isAllCaps = false
                 textSize = 11f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(if (attended) parseColor("#2E8B57") else paletteWhite())
-                setPadding(dp(11), dp(5), dp(11), dp(5))
-                background = gradient(if (attended) "#E6F4EA" else "#2E8B57", if (attended) "#2E8B57" else null, dp(16).toFloat())
+                setTextColor(if (attended) Color.parseColor(if (isDarkMode()) "#6EE7B7" else "#2E8B57") else paletteLightText())
+                setPadding(dp(12), dp(5), dp(12), dp(5))
+                background = if (attended) {
+                    LiquidGlassKit.pillGlassSurface(
+                        this@MainActivity,
+                        if (isDarkMode()) "#3310B981" else "#292E8B57",
+                        "#802E8B57",
+                        16f
+                    )
+                } else {
+                    LiquidGlassKit.pillGlassSurface(this@MainActivity, "#2E8B57", "#99F8FAFC", 16f)
+                }
                 setOnClickListener {
                     db.recordAttendance(schedule.id, schedule.courseName, "HADIR")
                     Toast.makeText(this@MainActivity, "Hadir tercatat", Toast.LENGTH_SHORT).show()
                     refreshAll()
                 }
-                attachSpringPress(this)
+                LiquidGlassKit.attachLiquidTouch(this)
             }
             val share = Button(this).apply {
-                text = "Share WA"
+                text = "WA"
                 isAllCaps = false
                 textSize = 11f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(paletteWhite())
-                setPadding(dp(11), dp(5), dp(11), dp(5))
-                background = gradient("#25D366", radius = dp(16).toFloat())
+                setTextColor(paletteLightText())
+                setPadding(dp(10), dp(5), dp(10), dp(5))
+                background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#16A34A", "#99F8FAFC", 16f)
                 setOnClickListener { shareSchedule(schedule) }
-                attachSpringPress(this)
+                LiquidGlassKit.attachLiquidTouch(this)
             }
             val btnEdit = TextView(this).apply {
                 text = "Edit"
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(parseColor("#5B6AD0"))
+                setTextColor(Color.parseColor(if (isDarkMode()) "#93C5FD" else "#4338CA"))
                 setPadding(dp(8), dp(6), dp(8), dp(6))
                 setOnClickListener { showScheduleEditorDialog(schedule) }
+                LiquidGlassKit.attachLiquidTouch(this)
             }
             val btnDelete = TextView(this).apply {
                 text = "Hapus"
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(parseColor("#DC2626"))
+                setTextColor(Color.parseColor(if (isDarkMode()) "#FCA5A5" else "#DC2626"))
                 setPadding(dp(6), dp(6), dp(6), dp(6))
                 setOnClickListener {
                     AlertDialog.Builder(this@MainActivity)
@@ -684,11 +937,12 @@ class MainActivity : AppCompatActivity() {
                         .setNegativeButton("Batal", null)
                         .show()
                 }
+                LiquidGlassKit.attachLiquidTouch(this)
             }
 
-            actionRow.addView(openClass, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)))
-            actionRow.addView(checkIn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)).apply { marginStart = dp(6) })
-            actionRow.addView(share, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)).apply { marginStart = dp(6) })
+            actionRow.addView(openClass, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(35)))
+            actionRow.addView(checkIn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(35)).apply { marginStart = dp(6) })
+            actionRow.addView(share, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(35)).apply { marginStart = dp(6) })
             actionRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
             actionRow.addView(btnEdit)
             actionRow.addView(btnDelete)
@@ -697,7 +951,7 @@ class MainActivity : AppCompatActivity() {
             scheduleListContainer.addView(card, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(12) })
+            ).apply { bottomMargin = dp(13) })
         }
     }
 
@@ -731,19 +985,27 @@ class MainActivity : AppCompatActivity() {
             text = if (enabled) "● $label" else "○ $label"
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(parseColor(if (enabled) "#2E8B57" else "#5A6577"))
-            setPadding(dp(8), dp(5), dp(8), dp(5))
-            background = gradient(
-                if (enabled) "#E6F4EA" else paletteCard(),
-                if (enabled) "#2E8B57" else paletteBorder(),
-                dp(12).toFloat()
+            setTextColor(
+                if (enabled) Color.parseColor(if (isDarkMode()) "#6EE7B7" else "#2E8B57")
+                else paletteSubtext()
             )
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = if (enabled) {
+                LiquidGlassKit.pillGlassSurface(
+                    this@MainActivity,
+                    if (isDarkMode()) "#3310B981" else "#262E8B57",
+                    if (isDarkMode()) "#806EE7B7" else "#802E8B57",
+                    13f
+                )
+            } else {
+                LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 13f, strongRim = false)
+            }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { marginEnd = dp(6) }
             setOnClickListener { onToggle() }
-            attachSpringPress(this)
+            LiquidGlassKit.attachLiquidTouch(this)
         }
     }
 
@@ -847,8 +1109,10 @@ class MainActivity : AppCompatActivity() {
                     setPadding(dp(10), dp(10), dp(10), dp(10))
                 }
                 row.addView(TextView(this).apply {
-                    text = "${log.dateStr}\n${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(log.timestamp))}\n${log.courseName}"
+                    text = "${log.dateStr} • ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(log.timestamp))}\n${log.courseName}"
                     textSize = 13f
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
                     setTextColor(paletteText())
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
@@ -856,11 +1120,13 @@ class MainActivity : AppCompatActivity() {
                     text = log.status
                     textSize = 11f
                     setTypeface(null, Typeface.BOLD)
-                    setTextColor(paletteWhite())
+                    setTextColor(paletteLightText())
                     setPadding(dp(10), dp(5), dp(10), dp(5))
-                    background = gradient(
+                    background = LiquidGlassKit.pillGlassSurface(
+                        this@MainActivity,
                         if (log.status == "HADIR") "#2E8B57" else "#DC2626",
-                        radius = dp(12).toFloat()
+                        "#80F8FAFC",
+                        12f
                     )
                 })
                 container.addView(row)
@@ -889,13 +1155,12 @@ class MainActivity : AppCompatActivity() {
             isChecked = db.getSetting("math_dismiss", "0") == "1"
         }
         val darkSwitch = SwitchCompat(this).apply {
-            text = "Mode Gelap (Dark Mode)"
-            isChecked = db.getSetting("dark_mode", "0") == "1"
+            text = "Mode Gelap (Dark Obsidian Glass)"
+            isChecked = isDarkMode()
         }
         val ringButton = Button(this).apply {
             text = "Pilih Nada Dering (MP3)"
             setOnClickListener { ringtonePicker.launch(arrayOf("audio/*")) }
-            attachSpringPress(this)
         }
         val resetRingButton = Button(this).apply {
             text = "Reset Nada Default"
@@ -903,17 +1168,14 @@ class MainActivity : AppCompatActivity() {
                 db.setSetting("custom_ringtone_uri", "")
                 Toast.makeText(this@MainActivity, "Nada default dipulihkan", Toast.LENGTH_SHORT).show()
             }
-            attachSpringPress(this)
         }
         val backupButton = Button(this).apply {
             text = "Backup Data (JSON)"
             setOnClickListener { backupPicker.launch("absenguard-backup.json") }
-            attachSpringPress(this)
         }
         val restoreButton = Button(this).apply {
             text = "Restore Data (JSON)"
             setOnClickListener { restorePicker.launch(arrayOf("application/json", "*/*")) }
-            attachSpringPress(this)
         }
         container.addView(urlLabel)
         container.addView(urlInput)
@@ -932,7 +1194,6 @@ class MainActivity : AppCompatActivity() {
                     .ifEmpty { "https://elearning.ubpkarawang.ac.id/login/index.php" })
                 db.setSetting("math_dismiss", if (mathSwitch.isChecked) "1" else "0")
                 db.setSetting("dark_mode", if (darkSwitch.isChecked) "1" else "0")
-                applyDarkMode()
                 Toast.makeText(this, "Pengaturan disimpan", Toast.LENGTH_SHORT).show()
                 recreate()
             }
@@ -965,52 +1226,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyDarkMode() {
-        if (db.getSetting("dark_mode", "0") == "1") {
-            window.statusBarColor = parseColor("#12151C")
-            window.navigationBarColor = parseColor("#12151C")
-        } else {
-            window.statusBarColor = parseColor("#F8F9FA")
-            window.navigationBarColor = parseColor("#F8F9FA")
+    private fun isDarkMode(): Boolean = db.getSetting("dark_mode", "0") == "1"
+
+    private fun applySystemBars() {
+        val dark = isDarkMode()
+        window.statusBarColor = Color.parseColor(if (dark) "#080C16" else "#E8EEFF")
+        window.navigationBarColor = Color.parseColor(if (dark) "#0B1324" else "#E6F7FA")
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
         }
     }
 
-    private fun paletteBg(): String = if (db.getSetting("dark_mode", "0") == "1") "#12151C" else "#F8F9FA"
-    private fun paletteCard(): String = if (db.getSetting("dark_mode", "0") == "1") "#1C212C" else "#EEF1F6"
-    private fun paletteBorder(): String = if (db.getSetting("dark_mode", "0") == "1") "#2D3545" else "#D5DCE6"
-    private fun paletteText(): Int = parseColor(if (db.getSetting("dark_mode", "0") == "1") "#F1F5F9" else "#1E2430")
-    private fun paletteSubtext(): Int = parseColor(if (db.getSetting("dark_mode", "0") == "1") "#94A3B8" else "#5A6577")
-    private fun paletteWhite(): Int = parseColor("#F8F9FA")
-
-    private fun gradient(color: String, border: String? = null, radius: Float = 0f): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(parseColor(color))
-            cornerRadius = radius
-            border?.let { setStroke(dp(1), parseColor(it)) }
-        }
-    }
-
-    private fun parseColor(color: String): Int = Color.parseColor(color)
-
-    private fun attachSpringPress(view: View) {
-        view.setOnTouchListener { v, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(90).start()
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(180)
-                        .setInterpolator(OvershootInterpolator(2f)).start()
-                }
-            }
-            false
-        }
-    }
+    private fun paletteText(): Int = Color.parseColor(if (isDarkMode()) "#F1F5F9" else "#0F172A")
+    private fun paletteSubtext(): Int = Color.parseColor(if (isDarkMode()) "#94A3B8" else "#475569")
+    private fun paletteLightText(): Int = Color.parseColor("#F8FAFC")
 
     private fun startBreathing(view: View) {
-        view.animate().scaleX(1.015f).scaleY(1.015f).setDuration(900)
+        view.animate().scaleX(1.012f).scaleY(1.012f).setDuration(1400L)
             .withEndAction {
-                view.animate().scaleX(1f).scaleY(1f).setDuration(900)
+                view.animate().scaleX(1f).scaleY(1f).setDuration(1400L)
                     .withEndAction { startBreathing(view) }.start()
             }.start()
     }
