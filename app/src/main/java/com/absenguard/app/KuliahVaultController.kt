@@ -1,4 +1,4 @@
-1package com.absenguard.app
+package com.absenguard.app
 
 import android.Manifest
 import android.app.AlertDialog
