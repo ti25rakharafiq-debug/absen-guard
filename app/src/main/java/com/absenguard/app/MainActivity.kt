@@ -5,7 +5,6 @@ import android.app.AlarmManager
 import android.app.AlertDialog
 import android.app.NotificationManager
 import android.app.TimePickerDialog
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -171,7 +170,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteText())
         })
         titleCol.addView(TextView(this).apply {
-            text = "Pengingat Absen Kuliah & Alarm Otomatis"
+            text = "Pengingat Absen E-Learning UBP"
             textSize = 12f
             setTextColor(paletteSubtext())
         })
@@ -371,38 +370,42 @@ class MainActivity : AppCompatActivity() {
         val test = Button(this).apply {
             text = "Tes Dering"
             isAllCaps = false
+            textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteWhite())
             background = gradient("#5B6AD0", radius = dp(18).toFloat())
             setOnClickListener {
                 AlarmScheduler.triggerInstantTest(this@MainActivity)
-                Toast.makeText(this@MainActivity, "Tes alarm aktif", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Tes alarm aktif 3 detik", Toast.LENGTH_SHORT).show()
             }
             attachSpringPress(this)
         }
         val portal = Button(this).apply {
-            text = "Buka Portal SIPT2"
+            text = "Buka E-Learning"
             isAllCaps = false
+            textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteWhite())
             background = gradient("#2E8B57", radius = dp(18).toFloat())
             setOnClickListener {
-                startActivity(Intent(this@MainActivity, SiptPortalActivity::class.java))
+                val nextSchedule = AlarmScheduler.getNextUpcomingSchedule(this@MainActivity)?.first
+                openCoursePortal(nextSchedule)
             }
             attachSpringPress(this)
         }
         val silent = Button(this).apply {
             text = getSilentButtonLabel()
             isAllCaps = false
+            textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteWhite())
             background = gradient("#D97706", radius = dp(18).toFloat())
             setOnClickListener { toggleSilentMode(this) }
             attachSpringPress(this)
         }
-        val p1 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5) }
-        val p2 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(5); marginEnd = dp(5) }
-        val p3 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(5) }
+        val p1 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4) }
+        val p2 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4); marginEnd = dp(4) }
+        val p3 = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4) }
         row.addView(test, p1)
         row.addView(portal, p2)
         row.addView(silent, p3)
@@ -411,13 +414,23 @@ class MainActivity : AppCompatActivity() {
         mainContent.addView(space(14))
     }
 
+    private fun openCoursePortal(schedule: CourseSchedule?) {
+        val intent = Intent(this, SiptPortalActivity::class.java)
+        if (schedule != null) {
+            intent.putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, schedule.id)
+            intent.putExtra(SiptPortalActivity.EXTRA_COURSE_URL, schedule.courseUrl)
+            intent.putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, schedule.courseName)
+        }
+        startActivity(intent)
+    }
+
     private fun getSilentButtonLabel(): String {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         return if (nm.isNotificationPolicyAccessGranted && am.ringerMode == AudioManager.RINGER_MODE_VIBRATE) {
             "Mode Hening ✓"
         } else {
-            "Mode Hening Kelas"
+            "Mode Hening"
         }
     }
 
@@ -550,7 +563,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 textSize = 12f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor("#5B6AD0".let(::parseColor))
+                setTextColor(parseColor("#5B6AD0"))
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
             val online = schedule.classMode.equals("Online", ignoreCase = true)
@@ -561,6 +574,10 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(paletteWhite())
                 setPadding(dp(10), dp(4), dp(10), dp(4))
                 background = gradient(if (online) "#D97706" else "#5B6AD0", radius = dp(12).toFloat())
+                setOnClickListener {
+                    db.updateSchedule(schedule.copy(classMode = if (online) "Offline" else "Online"))
+                    refreshAll()
+                }
             })
             card.addView(top)
             card.addView(space(6))
@@ -599,15 +616,30 @@ class MainActivity : AppCompatActivity() {
             })
             card.addView(toggleRow)
             card.addView(space(8))
-            val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+
+            val actionRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val openClass = Button(this).apply {
+                text = "Buka Kelas"
+                isAllCaps = false
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(paletteWhite())
+                setPadding(dp(11), dp(5), dp(11), dp(5))
+                background = gradient("#5B6AD0", radius = dp(16).toFloat())
+                setOnClickListener { openCoursePortal(schedule) }
+                attachSpringPress(this)
+            }
             val attended = db.isAttendedToday(schedule.id)
             val checkIn = Button(this).apply {
-                text = if (attended) "Sudah Absen ✓" else "Absen Sekarang"
+                text = if (attended) "Hadir ✓" else "Absen"
                 isAllCaps = false
-                textSize = 12f
+                textSize = 11f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(if (attended) parseColor("#2E8B57") else paletteWhite())
-                setPadding(dp(12), dp(5), dp(12), dp(5))
+                setPadding(dp(11), dp(5), dp(11), dp(5))
                 background = gradient(if (attended) "#E6F4EA" else "#2E8B57", if (attended) "#2E8B57" else null, dp(16).toFloat())
                 setOnClickListener {
                     db.recordAttendance(schedule.id, schedule.courseName, "HADIR")
@@ -619,17 +651,48 @@ class MainActivity : AppCompatActivity() {
             val share = Button(this).apply {
                 text = "Share WA"
                 isAllCaps = false
-                textSize = 12f
+                textSize = 11f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(paletteWhite())
+                setPadding(dp(11), dp(5), dp(11), dp(5))
                 background = gradient("#25D366", radius = dp(16).toFloat())
                 setOnClickListener { shareSchedule(schedule) }
                 attachSpringPress(this)
             }
-            actionRow.addView(checkIn)
-            actionRow.addView(share, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)).apply {
-                marginStart = dp(8)
-            })
+            val btnEdit = TextView(this).apply {
+                text = "Edit"
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(parseColor("#5B6AD0"))
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+                setOnClickListener { showScheduleEditorDialog(schedule) }
+            }
+            val btnDelete = TextView(this).apply {
+                text = "Hapus"
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(parseColor("#DC2626"))
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                setOnClickListener {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Hapus Jadwal")
+                        .setMessage("Hapus ${schedule.courseName}?")
+                        .setPositiveButton("Hapus") { _, _ ->
+                            db.deleteSchedule(schedule.id)
+                            refreshAll()
+                        }
+                        .setNegativeButton("Batal", null)
+                        .show()
+                }
+            }
+
+            actionRow.addView(openClass, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)))
+            actionRow.addView(checkIn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)).apply { marginStart = dp(6) })
+            actionRow.addView(share, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34)).apply { marginStart = dp(6) })
+            actionRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+            actionRow.addView(btnEdit)
+            actionRow.addView(btnDelete)
+
             card.addView(actionRow)
             scheduleListContainer.addView(card, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -639,11 +702,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun shareSchedule(schedule: CourseSchedule) {
+        val targetLink = schedule.courseUrl.ifBlank { "https://elearning.ubpkarawang.ac.id" }
         val message = "Pengingat Kuliah: ${schedule.courseName}\n" +
             "Hari/Jam: ${dayName(schedule.dayOfWeek)}, " +
             String.format(Locale.getDefault(), "%02d:%02d - %02d:%02d\n", schedule.startHour, schedule.startMinute, schedule.endHour, schedule.endMinute) +
             "Ruang/Mode: ${schedule.room} (${schedule.classMode})\n" +
-            "Portal Absen: https://sipt2.ubpkarawang.ac.id/apps"
+            "Link E-Learning: $targetLink"
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, message)
@@ -696,6 +760,7 @@ class MainActivity : AppCompatActivity() {
         }
         val nameInput = EditText(this).apply { hint = "Nama Mata Kuliah"; setText(existing?.courseName ?: "") }
         val roomInput = EditText(this).apply { hint = "Ruangan"; setText(existing?.room ?: "") }
+        val urlInput = EditText(this).apply { hint = "URL E-Learning Matkul"; setText(existing?.courseUrl ?: "") }
         val modes = listOf("Offline", "Online")
         val modeSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, modes)
@@ -726,6 +791,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(daySpinner)
         container.addView(nameInput)
         container.addView(roomInput)
+        container.addView(urlInput)
         container.addView(modeSpinner)
         container.addView(startButton)
         container.addView(endButton)
@@ -751,7 +817,8 @@ class MainActivity : AppCompatActivity() {
                     existing?.ringEnabled ?: true,
                     existing?.vibrateEnabled ?: true,
                     existing?.notifEnabled ?: true,
-                    true
+                    true,
+                    urlInput.text.toString().trim()
                 )
                 if (existing == null) db.insertSchedule(schedule) else db.updateSchedule(schedule)
                 refreshAll()
@@ -809,13 +876,13 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(16), dp(20), dp(8))
         }
         val urlLabel = TextView(this).apply {
-            text = "Link Portal Absen"
+            text = "URL Login Utama E-Learning"
             textSize = 13f
             setTypeface(null, Typeface.BOLD)
             setTextColor(paletteText())
         }
         val urlInput = EditText(this).apply {
-            setText(db.getSetting("portal_url", "https://sipt2.ubpkarawang.ac.id/apps"))
+            setText(db.getSetting("portal_url", "https://elearning.ubpkarawang.ac.id/login/index.php"))
         }
         val mathSwitch = SwitchCompat(this).apply {
             text = "Tantangan Hitungan Pagi"
@@ -862,7 +929,7 @@ class MainActivity : AppCompatActivity() {
             .setView(container)
             .setPositiveButton("Simpan") { _, _ ->
                 db.setSetting("portal_url", urlInput.text.toString().trim()
-                    .ifEmpty { "https://sipt2.ubpkarawang.ac.id/apps" })
+                    .ifEmpty { "https://elearning.ubpkarawang.ac.id/login/index.php" })
                 db.setSetting("math_dismiss", if (mathSwitch.isChecked) "1" else "0")
                 db.setSetting("dark_mode", if (darkSwitch.isChecked) "1" else "0")
                 applyDarkMode()
