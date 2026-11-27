@@ -628,6 +628,24 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         return writableDatabase.insert("vault_recordings", null, cv)
     }
 
+    fun updateVaultRecordingTranscript(id: Long, segments: List<RecordingSegment>) {
+        val segArr = JSONArray().apply {
+            segments.forEach { s ->
+                put(JSONObject().apply {
+                    put("text", s.text)
+                    put("startMs", s.startMs)
+                    put("endMs", s.endMs)
+                })
+            }
+        }
+        val fullText = segments.joinToString(" ") { it.text }
+        val cv = ContentValues().apply {
+            put("transcript_json", segArr.toString())
+            put("transcript_text", fullText)
+        }
+        writableDatabase.update("vault_recordings", cv, "id = ?", arrayOf(id.toString()))
+    }
+
     fun listVaultRecordings(courseKey: String? = null): List<VaultRecording> {
         val list = mutableListOf<VaultRecording>()
         val cursor = if (courseKey.isNullOrBlank()) {
