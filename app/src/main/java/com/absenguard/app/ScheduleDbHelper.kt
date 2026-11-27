@@ -37,7 +37,7 @@ data class AttendanceLog(
     val timestamp: Long
 )
 
-class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 2) {
+class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -114,7 +114,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             "math_dismiss" to "0",
             "portal_url" to "https://elearning.ubpkarawang.ac.id/login/index.php",
             "sipt_username" to "ti25.rakharafiq@mhs.ubpkarawang.ac.id",
-            "sipt_password" to "ubpk2024",
+            "sipt_password" to "Buana0000!",
             "custom_ringtone_uri" to "",
             "dark_mode" to "0"
         )
@@ -153,6 +153,12 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 put("value", "https://elearning.ubpkarawang.ac.id/login/index.php")
             }
             db.update("app_settings", portalCv, "key = 'portal_url' AND value LIKE '%sipt2%'", null)
+        }
+        if (oldVersion < 3) {
+            val passCv = ContentValues().apply {
+                put("value", "Buana0000!")
+            }
+            db.update("app_settings", passCv, "key = 'sipt_password' AND value = 'ubpk2024'", null)
         }
     }
 
@@ -401,9 +407,11 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 }
                 val settings = root.optJSONObject("app_settings") ?: JSONObject()
                 settings.keys().forEach { key ->
+                    val rawVal = settings.getString(key)
+                    val finalVal = if (key == "sipt_password" && rawVal == "ubpk2024") "Buana0000!" else rawVal
                     val cv = ContentValues().apply {
                         put("key", key)
-                        put("value", settings.getString(key))
+                        put("value", finalVal)
                     }
                     db.insert("app_settings", null, cv)
                 }
