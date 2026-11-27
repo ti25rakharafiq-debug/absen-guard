@@ -8,6 +8,10 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -35,9 +39,11 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.sqrt
 import kotlin.random.Random
 
-class AlarmAlertActivity : AppCompatActivity() {
+class AlarmAlertActivity : AppCompatActivity(), SensorEventListener {
 
     companion object {
         var activeRingtone: Ringtone? = null
@@ -60,9 +66,20 @@ class AlarmAlertActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var auroraView: AuroraMeshView
     private lateinit var clockView: TextView
+    private lateinit var sensorHintView: TextView
     private var expectedAnswer = 0
     private var mathRequired = false
     private var mathInput: EditText? = null
+    private var activeScheduleId = -1L
+
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+    private var alarmStartedAt = 0L
+    private var sawNonFaceDown = false
+    private var flippedMuted = false
+    private var shakeCount = 0
+    private var lastShakeTimestamp = 0L
+    private var gestureHandled = false
 
     private val clockRunnable = object : Runnable {
         override fun run() {
@@ -74,6 +91,7 @@ class AlarmAlertActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         stopActiveAlarm()
+        alarmStartedAt = System.currentTimeMillis()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
@@ -84,6 +102,7 @@ class AlarmAlertActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val scheduleId = intent.getLongExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, -1L)
+        activeScheduleId = scheduleId
         val db = ScheduleDbHelper(this)
         val isDark = db.getSetting("dark_mode", "0") == "1"
 
@@ -189,6 +208,9 @@ class AlarmAlertActivity : AppCompatActivity() {
             }
         }
 
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
         val rootFrame = FrameLayout(this)
         auroraView = AuroraMeshView(this) { isDark }
         rootFrame.addView(
@@ -276,6 +298,14 @@ class AlarmAlertActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
         }
 
+        sensorHintView = TextView(this).apply {
+            text = "Goyang HP: Tunda 5m  •  Balik Layar: Bisukan"
+            textSize = 11f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor(if (isDark) "#6EE7B7" else "#2E8B57"))
+            gravity = Gravity.CENTER
+        }
+
         card.addView(badge)
         card.addView(space(14))
         card.addView(clockView)
@@ -283,6 +313,8 @@ class AlarmAlertActivity : AppCompatActivity() {
         card.addView(titleView)
         card.addView(space(8))
         card.addView(subtitleView)
+        card.addView(space(8))
+        card.addView(sensorHintView)
 
         if (mathRequired) {
             val a = Random.nextInt(4, 16)
@@ -339,14 +371,10 @@ class AlarmAlertActivity : AppCompatActivity() {
         }
 
         val btnSnooze = makeActionButton("Tunda 5 Menit", "#D97706") {
-            stopActiveAlarm()
-            cancelNotif(schedule.id)
-            AlarmScheduler.scheduleSnooze(this, schedule.id, 5)
-            Toast.makeText(this, "Alarm ditunda 5 menit", Toast.LENGTH_SHORT).show()
-            finish()
+            triggerSnooze(schedule.id, "Alarm ditunda 5 menit")
         }
 
-        card.addView(space(22))
+        card.addView(space(20))
         card.addView(btnPortal, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
         card.addView(space(10))
         card.addView(btnAttend, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
@@ -362,11 +390,81 @@ class AlarmAlertActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         auroraView.startMotion()
+        accelerometer?.let {
+            sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
     }
 
     override fun onPause() {
         auroraView.stopMotion()
+        sensorManager?.unregisterListener(this)
         super.onPause()
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type != Sensor.TYPE_ACCELEROMETER || gestureHandled) return
+        val now = System.currentTimeMillis()
+        if (now - alarmStartedAt < 1500L) return
+
+        val x = event.values[0]
+        val y = event.values[1]
+        val z = event.values[2]
+
+        // 1. Flip Face-Down to Mute Ringtone & Vibration
+        if (z > -2.0f) {
+            sawNonFaceDown = true
+        }
+        if (!flippedMuted && sawNonFaceDown && z < -7.5f && abs(x) < 4.5f && abs(y) < 4.5f) {
+            flippedMuted = true
+            stopActiveAlarm()
+            pulseConfirmationBuzz()
+            sensorHintView.text = "Suara Dibisukan (Layar Tengkurap)"
+            sensorHintView.setTextColor(Color.parseColor("#F59E0B"))
+            return
+        }
+
+        // 2. Shake Gesture to Snooze 5 Minutes
+        val gX = x / SensorManager.GRAVITY_EARTH
+        val gY = y / SensorManager.GRAVITY_EARTH
+        val gZ = z / SensorManager.GRAVITY_EARTH
+        val gForce = sqrt(gX * gX + gY * gY + gZ * gZ)
+
+        if (gForce > 2.35f) {
+            if (now - lastShakeTimestamp > 650L) {
+                shakeCount = 0
+            }
+            lastShakeTimestamp = now
+            shakeCount++
+            if (shakeCount >= 2) {
+                gestureHandled = true
+                pulseConfirmationBuzz()
+                triggerSnooze(activeScheduleId, "Digoyang: Alarm ditunda 5 menit")
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    private fun pulseConfirmationBuzz() {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vm.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+            vibrator.vibrate(VibrationEffect.createOneShot(75L, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun triggerSnooze(scheduleId: Long, message: String) {
+        stopActiveAlarm()
+        cancelNotif(scheduleId)
+        AlarmScheduler.scheduleSnooze(this, scheduleId, 5)
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        finish()
     }
 
     private fun validateMath(): Boolean {
@@ -411,6 +509,7 @@ class AlarmAlertActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(clockRunnable)
+        sensorManager?.unregisterListener(this)
         stopActiveAlarm()
         super.onDestroy()
     }
