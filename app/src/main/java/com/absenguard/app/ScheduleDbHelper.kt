@@ -24,7 +24,8 @@ data class CourseSchedule(
     val ringEnabled: Boolean,
     val vibrateEnabled: Boolean,
     val notifEnabled: Boolean,
-    val active: Boolean
+    val active: Boolean,
+    val courseUrl: String = ""
 )
 
 data class AttendanceLog(
@@ -36,7 +37,7 @@ data class AttendanceLog(
     val timestamp: Long
 )
 
-class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 1) {
+class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -53,7 +54,8 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 "ring_enabled INTEGER NOT NULL DEFAULT 1, " +
                 "vibrate_enabled INTEGER NOT NULL DEFAULT 1, " +
                 "notif_enabled INTEGER NOT NULL DEFAULT 1, " +
-                "active INTEGER NOT NULL DEFAULT 1)"
+                "active INTEGER NOT NULL DEFAULT 1, " +
+                "course_url TEXT NOT NULL DEFAULT '')"
         )
 
         db.execSQL(
@@ -73,16 +75,16 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         )
 
         val initialCourses = listOf(
-            CourseSchedule(0, Calendar.MONDAY, 7, 0, 8, 40, "Pemasaran Industri", "A405", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.MONDAY, 9, 0, 10, 40, "Ilmu Bahan dan Kimia Lingkungan", "F405", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.MONDAY, 11, 0, 12, 40, "Teori Probabilitas", "A306", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.MONDAY, 13, 0, 14, 40, "Analisis dan Estimasi Biaya", "A405", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.TUESDAY, 7, 0, 8, 40, "Algoritma & Pemrograman Komputer (T)", "F302", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.TUESDAY, 9, 0, 10, 40, "Operasional Riset 1", "F207", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.WEDNESDAY, 9, 0, 10, 40, "Algoritma & Pemrograman Komputer (P)", "LAB", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.THURSDAY, 11, 0, 12, 40, "Analisis dan Perancangan Kerja (T)", "A404", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.THURSDAY, 13, 0, 14, 40, "Analisis Perancangan Kerja (P)", "LAB", "Offline", true, true, true, true),
-            CourseSchedule(0, Calendar.FRIDAY, 13, 0, 14, 40, "Jatidiri Bangsa", "F207", "Offline", true, true, true, true)
+            CourseSchedule(0, Calendar.MONDAY, 7, 0, 8, 40, "Pemasaran Industri", "A405", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=393"),
+            CourseSchedule(0, Calendar.MONDAY, 9, 0, 10, 40, "Ilmu Bahan dan Kimia Lingkungan", "F405", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=401"),
+            CourseSchedule(0, Calendar.MONDAY, 11, 0, 12, 40, "Teori Probabilitas", "A306", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=400"),
+            CourseSchedule(0, Calendar.MONDAY, 13, 0, 14, 40, "Analisis dan Estimasi Biaya", "A405", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=392"),
+            CourseSchedule(0, Calendar.TUESDAY, 7, 0, 8, 40, "Algoritma & Pemrograman Komputer (T)", "F302", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=1297"),
+            CourseSchedule(0, Calendar.TUESDAY, 9, 0, 10, 40, "Operasional Riset 1", "F207", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=396"),
+            CourseSchedule(0, Calendar.WEDNESDAY, 9, 0, 10, 40, "Algoritma & Pemrograman Komputer (P)", "LAB", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=2543"),
+            CourseSchedule(0, Calendar.THURSDAY, 11, 0, 12, 40, "Analisis dan Perancangan Kerja (T)", "A404", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=398"),
+            CourseSchedule(0, Calendar.THURSDAY, 13, 0, 14, 40, "Analisis Perancangan Kerja (P)", "LAB", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=397"),
+            CourseSchedule(0, Calendar.FRIDAY, 13, 0, 14, 40, "Jatidiri Bangsa", "F207", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=1372")
         )
 
         for (course in initialCourses) {
@@ -99,6 +101,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 put("vibrate_enabled", 1)
                 put("notif_enabled", 1)
                 put("active", 1)
+                put("course_url", course.courseUrl)
             }
             db.insert("schedules", null, cv)
         }
@@ -109,7 +112,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             "global_notif" to "1",
             "pre_reminder_10m" to "1",
             "math_dismiss" to "0",
-            "portal_url" to "https://sipt2.ubpkarawang.ac.id/apps",
+            "portal_url" to "https://elearning.ubpkarawang.ac.id/login/index.php",
             "sipt_username" to "ti25.rakharafiq@mhs.ubpkarawang.ac.id",
             "sipt_password" to "ubpk2024",
             "custom_ringtone_uri" to "",
@@ -125,17 +128,39 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS schedules")
-        db.execSQL("DROP TABLE IF EXISTS attendance_logs")
-        db.execSQL("DROP TABLE IF EXISTS app_settings")
-        onCreate(db)
+        if (oldVersion < 2) {
+            try {
+                db.execSQL("ALTER TABLE schedules ADD COLUMN course_url TEXT NOT NULL DEFAULT ''")
+            } catch (_: Exception) {
+            }
+            val urlMap = mapOf(
+                "Pemasaran Industri" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=393",
+                "Ilmu Bahan dan Kimia Lingkungan" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=401",
+                "Teori Probabilitas" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=400",
+                "Analisis dan Estimasi Biaya" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=392",
+                "Algoritma & Pemrograman Komputer (T)" to "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=1297",
+                "Operasional Riset 1" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=396",
+                "Algoritma & Pemrograman Komputer (P)" to "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=2543",
+                "Analisis dan Perancangan Kerja (T)" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=398",
+                "Analisis Perancangan Kerja (P)" to "https://elearning.ubpkarawang.ac.id/course/view.php?id=397",
+                "Jatidiri Bangsa" to "https://elearning.ubpkarawang.ac.id/mod/attendance/view.php?id=1372"
+            )
+            for ((name, url) in urlMap) {
+                val cv = ContentValues().apply { put("course_url", url) }
+                db.update("schedules", cv, "course_name = ? AND course_url = ''", arrayOf(name))
+            }
+            val portalCv = ContentValues().apply {
+                put("value", "https://elearning.ubpkarawang.ac.id/login/index.php")
+            }
+            db.update("app_settings", portalCv, "key = 'portal_url' AND value LIKE '%sipt2%'", null)
+        }
     }
 
     fun getAllSchedules(): List<CourseSchedule> {
         val list = mutableListOf<CourseSchedule>()
         val db = readableDatabase
         val cursor = db.rawQuery(
-            "SELECT id, day_of_week, start_hour, start_minute, end_hour, end_minute, course_name, room, class_mode, ring_enabled, vibrate_enabled, notif_enabled, active FROM schedules ORDER BY day_of_week ASC, start_hour ASC, start_minute ASC",
+            "SELECT id, day_of_week, start_hour, start_minute, end_hour, end_minute, course_name, room, class_mode, ring_enabled, vibrate_enabled, notif_enabled, active, course_url FROM schedules ORDER BY day_of_week ASC, start_hour ASC, start_minute ASC",
             null
         )
         cursor.use {
@@ -154,7 +179,8 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                         ringEnabled = it.getInt(9) == 1,
                         vibrateEnabled = it.getInt(10) == 1,
                         notifEnabled = it.getInt(11) == 1,
-                        active = it.getInt(12) == 1
+                        active = it.getInt(12) == 1,
+                        courseUrl = it.getString(13) ?: ""
                     )
                 )
             }
@@ -184,6 +210,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             put("vibrate_enabled", if (schedule.vibrateEnabled) 1 else 0)
             put("notif_enabled", if (schedule.notifEnabled) 1 else 0)
             put("active", if (schedule.active) 1 else 0)
+            put("course_url", schedule.courseUrl)
         }
         return writableDatabase.insert("schedules", null, cv)
     }
@@ -202,6 +229,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             put("vibrate_enabled", if (schedule.vibrateEnabled) 1 else 0)
             put("notif_enabled", if (schedule.notifEnabled) 1 else 0)
             put("active", if (schedule.active) 1 else 0)
+            put("course_url", schedule.courseUrl)
         }
         writableDatabase.update("schedules", cv, "id = ?", arrayOf(schedule.id.toString()))
     }
@@ -304,6 +332,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 put("vibrate_enabled", if (schedule.vibrateEnabled) 1 else 0)
                 put("notif_enabled", if (schedule.notifEnabled) 1 else 0)
                 put("active", if (schedule.active) 1 else 0)
+                put("course_url", schedule.courseUrl)
             })
         }
         root.put("schedules", schedules)
@@ -354,6 +383,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                         put("vibrate_enabled", item.optInt("vibrate_enabled", 1))
                         put("notif_enabled", item.optInt("notif_enabled", 1))
                         put("active", item.optInt("active", 1))
+                        put("course_url", item.optString("course_url", ""))
                     }
                     db.insert("schedules", null, cv)
                 }
