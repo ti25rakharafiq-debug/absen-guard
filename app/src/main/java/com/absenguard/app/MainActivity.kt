@@ -9,8 +9,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.pdf.PdfDocument
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -40,9 +43,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -966,7 +972,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(paletteLightText())
                 setPadding(dp(10), dp(5), dp(10), dp(5))
                 background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#16A34A", "#99F8FAFC", 16f)
-                setOnClickListener { shareSchedule(schedule) }
+                setOnClickListener { showWhatsAppTemplateDialog(schedule) }
                 LiquidGlassKit.attachLiquidTouch(this)
             }
             val btnEdit = TextView(this).apply {
@@ -1013,13 +1019,55 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun shareSchedule(schedule: CourseSchedule) {
+    private fun showWhatsAppTemplateDialog(schedule: CourseSchedule) {
         val targetLink = schedule.courseUrl.ifBlank { "https://elearning.ubpkarawang.ac.id" }
-        val message = "Pengingat Kuliah: ${schedule.courseName}\n" +
-            "Hari/Jam: ${dayName(schedule.dayOfWeek)}, " +
-            String.format(Locale.getDefault(), "%02d:%02d - %02d:%02d\n", schedule.startHour, schedule.startMinute, schedule.endHour, schedule.endMinute) +
-            "Ruang/Mode: ${schedule.room} (${schedule.classMode})\n" +
-            "Link E-Learning: $targetLink"
+        val day = dayName(schedule.dayOfWeek)
+        val timeRange = String.format(
+            Locale.getDefault(),
+            "%02d:%02d - %02d:%02d",
+            schedule.startHour,
+            schedule.startMinute,
+            schedule.endHour,
+            schedule.endMinute
+        )
+        val startTime = String.format(Locale.getDefault(), "%02d:%02d", schedule.startHour, schedule.startMinute)
+
+        val options = arrayOf(
+            "Gaya Santai (Grup Kelas)",
+            "Gaya Formal (Dosen / Komting)",
+            "Ringkas Satu Baris (Cepat)",
+            "Pengumuman Pindah Mode (${schedule.classMode})"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("Pilih Format Pesan WhatsApp")
+            .setItems(options) { _, which ->
+                val message = when (which) {
+                    0 -> "Halo guys, info kuliah bentar lagi ya:\n" +
+                        "*${schedule.courseName}*\n" +
+                        "Hari/Jam: $day, $timeRange\n" +
+                        "Ruang: ${schedule.room} (${schedule.classMode})\n" +
+                        "Link E-Learning: $targetLink\n" +
+                        "Jangan lupa siapin absennya ya!"
+                    1 -> "Assalamu'alaikum Wr. Wb. / Selamat pagi.\n" +
+                        "Izin menginformasikan jadwal perkuliahan:\n" +
+                        "• Mata Kuliah: ${schedule.courseName}\n" +
+                        "• Waktu: $day, $timeRange\n" +
+                        "• Tempat/Metode: Ruang ${schedule.room} (${schedule.classMode})\n" +
+                        "• Tautan E-Learning: $targetLink\n" +
+                        "Terima kasih."
+                    2 -> "[$day $startTime] ${schedule.courseName} — Ruang ${schedule.room} (${schedule.classMode}) | $targetLink"
+                    else -> "*UPDATE PERKULIAHAN*\n" +
+                        "Mata Kuliah *${schedule.courseName}* ($day, $timeRange) dilaksanakan secara *${schedule.classMode.uppercase(Locale.getDefault())}* (Ruang ${schedule.room}).\n" +
+                        "Akses kelas & presensi: $targetLink"
+                }
+                sendTextToWhatsApp(message)
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    private fun sendTextToWhatsApp(message: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, message)
@@ -1033,7 +1081,7 @@ class MainActivity : AppCompatActivity() {
                     type = "text/plain"
                     putExtra(Intent.EXTRA_TEXT, message)
                 },
-                "Bagikan pengingat kuliah"
+                "Bagikan pesan perkuliahan"
             ))
         }
     }
@@ -1191,7 +1239,209 @@ class MainActivity : AppCompatActivity() {
             }
         }
         scroll.addView(container)
-        AlertDialog.Builder(this).setTitle("Riwayat Kehadiran").setView(scroll).setPositiveButton("Tutup", null).show()
+        AlertDialog.Builder(this)
+            .setTitle("Riwayat Kehadiran")
+            .setView(scroll)
+            .setNeutralButton("Ekspor PDF") { _, _ -> exportAttendancePdf() }
+            .setPositiveButton("Tutup", null)
+            .show()
+    }
+
+    private fun exportAttendancePdf() {
+        try {
+            val schedules = db.getAllSchedules()
+            val logs = db.getAllAttendanceLogs()
+
+            val pdf = PdfDocument()
+            val pageWidth = 595
+            val pageHeight = 842
+            var pageNumber = 1
+            var pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+            var page = pdf.startPage(pageInfo)
+            var canvas = page.canvas
+
+            val bannerPaint = Paint().apply { color = Color.parseColor("#312E81") }
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = 18f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val subBannerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#E0E7FF")
+                textSize = 10.5f
+            }
+            val sectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#0F172A")
+                textSize = 12.5f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val headerBgPaint = Paint().apply { color = Color.parseColor("#E2E8F0") }
+            val zebraPaint = Paint().apply { color = Color.parseColor("#F8FAFC") }
+            val linePaint = Paint().apply {
+                color = Color.parseColor("#CBD5E1")
+                strokeWidth = 1f
+            }
+            val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#1E293B")
+                textSize = 10f
+            }
+            val boldTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#0F172A")
+                textSize = 10f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val safePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#15803D")
+                textSize = 9.5f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val warnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#B91C1C")
+                textSize = 9.5f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+
+            // Top Banner
+            canvas.drawRoundRect(RectF(32f, 32f, (pageWidth - 32).toFloat(), 112f), 14f, 14f, bannerPaint)
+            canvas.drawText("REKAPITULASI KEHADIRAN PERKULIAHAN", 48f, 64f, titlePaint)
+            val datePrinted = SimpleDateFormat("dd MMMM yyyy, HH:mm", Locale.getDefault()).format(Date())
+            canvas.drawText("AbsenGuard • Universitas Buana Perjuangan Karawang • Dicetak: $datePrinted", 48f, 88f, subBannerPaint)
+
+            // Summary KPIs
+            var totalHadir = 0
+            var totalSesi = 0
+            for (s in schedules) {
+                val st = db.getAttendanceStats(s.id)
+                totalHadir += st.first
+                totalSesi += st.second
+            }
+            val avgPercent = if (totalSesi > 0) (totalHadir * 100) / totalSesi else 100
+
+            var y = 138f
+            canvas.drawText("1. RINGKASAN PERSENTASE PER MATA KULIAH", 36f, y, sectionPaint)
+            y += 14f
+            canvas.drawRect(36f, y, (pageWidth - 36).toFloat(), y + 22f, headerBgPaint)
+            canvas.drawText("No", 42f, y + 15f, boldTextPaint)
+            canvas.drawText("Mata Kuliah", 66f, y + 15f, boldTextPaint)
+            canvas.drawText("Jadwal", 295f, y + 15f, boldTextPaint)
+            canvas.drawText("Hadir", 415f, y + 15f, boldTextPaint)
+            canvas.drawText("Status", 475f, y + 15f, boldTextPaint)
+            y += 22f
+
+            schedules.forEachIndexed { idx, s ->
+                if (y > pageHeight - 70) {
+                    pdf.finishPage(page)
+                    pageNumber++
+                    pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+                    page = pdf.startPage(pageInfo)
+                    canvas = page.canvas
+                    y = 48f
+                }
+                if (idx % 2 == 1) {
+                    canvas.drawRect(36f, y, (pageWidth - 36).toFloat(), y + 22f, zebraPaint)
+                }
+                val st = db.getAttendanceStats(s.id)
+                val pct = if (st.second > 0) (st.first * 100) / st.second else 100
+                val healthy = !(pct < 80 && st.second > 0)
+                val shortCourse = if (s.courseName.length > 36) s.courseName.take(33) + "..." else s.courseName
+                val scheduleStr = String.format(
+                    Locale.getDefault(),
+                    "%s %02d:%02d (%s)",
+                    dayName(s.dayOfWeek).take(3),
+                    s.startHour,
+                    s.startMinute,
+                    s.room
+                )
+
+                canvas.drawText("${idx + 1}", 44f, y + 15f, textPaint)
+                canvas.drawText(shortCourse, 66f, y + 15f, textPaint)
+                canvas.drawText(scheduleStr, 295f, y + 15f, textPaint)
+                canvas.drawText("${st.first}/${st.second} ($pct%)", 415f, y + 15f, boldTextPaint)
+                canvas.drawText(
+                    if (healthy) "AMAN" else "PERHATIAN",
+                    475f,
+                    y + 15f,
+                    if (healthy) safePaint else warnPaint
+                )
+                canvas.drawLine(36f, y + 22f, (pageWidth - 36).toFloat(), y + 22f, linePaint)
+                y += 22f
+            }
+
+            y += 16f
+            canvas.drawText(
+                "Total Kehadiran Keseluruhan: $totalHadir dari $totalSesi pertemuan ($avgPercent%)",
+                36f,
+                y,
+                boldTextPaint
+            )
+
+            // Section 2: Detailed Logs
+            y += 28f
+            if (y > pageHeight - 90) {
+                pdf.finishPage(page)
+                pageNumber++
+                pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+                page = pdf.startPage(pageInfo)
+                canvas = page.canvas
+                y = 48f
+            }
+            canvas.drawText("2. RIWAYAT LOG PRESENSI (${logs.size} CATATAN)", 36f, y, sectionPaint)
+            y += 14f
+            canvas.drawRect(36f, y, (pageWidth - 36).toFloat(), y + 22f, headerBgPaint)
+            canvas.drawText("Tanggal & Jam", 42f, y + 15f, boldTextPaint)
+            canvas.drawText("Mata Kuliah", 165f, y + 15f, boldTextPaint)
+            canvas.drawText("Keterangan", 475f, y + 15f, boldTextPaint)
+            y += 22f
+
+            if (logs.isEmpty()) {
+                canvas.drawText("Belum ada catatan presensi terekam.", 42f, y + 16f, textPaint)
+            } else {
+                logs.forEachIndexed { idx, log ->
+                    if (y > pageHeight - 60) {
+                        pdf.finishPage(page)
+                        pageNumber++
+                        pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+                        page = pdf.startPage(pageInfo)
+                        canvas = page.canvas
+                        y = 48f
+                    }
+                    if (idx % 2 == 1) {
+                        canvas.drawRect(36f, y, (pageWidth - 36).toFloat(), y + 20f, zebraPaint)
+                    }
+                    val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(log.timestamp))
+                    val cName = if (log.courseName.length > 46) log.courseName.take(43) + "..." else log.courseName
+                    canvas.drawText("${log.dateStr} • $timeStr", 42f, y + 14f, textPaint)
+                    canvas.drawText(cName, 165f, y + 14f, textPaint)
+                    canvas.drawText(
+                        log.status,
+                        475f,
+                        y + 14f,
+                        if (log.status == "HADIR") safePaint else warnPaint
+                    )
+                    canvas.drawLine(36f, y + 20f, (pageWidth - 36).toFloat(), y + 20f, linePaint)
+                    y += 20f
+                }
+            }
+
+            pdf.finishPage(page)
+
+            val pdfDir = File(cacheDir, "pdfs").apply { if (!exists()) mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+            val outFile = File(pdfDir, "Rekap_Kehadiran_AbsenGuard_$stamp.pdf")
+            FileOutputStream(outFile).use { pdf.writeTo(it) }
+            pdf.close()
+
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", outFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Rekap Kehadiran AbsenGuard")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Simpan atau Kirim Rekap PDF"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Gagal membuat PDF: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun showSettingsDialog() {
