@@ -10,6 +10,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +30,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -54,11 +56,14 @@ class KuliahVaultController(
     // PDF navigation state
     private var selectedPdfFolder: String? = null
 
-    // Recording state
+    // Recording state (supports Pause/Resume, Live Bookmarks, IE Phonetic & Punctuation Engine)
     private var recordCourseKey: String = "umum"
     private var isRecording = false
+    private var isPaused = false
     private var recordModeStt = true
-    private var recordStartMs = 0L
+    private var sessionCreatedEpochMs = 0L
+    private var accumulatedRecordMs = 0L
+    private var activeSegmentStartEpochMs = 0L
     private var lastSegmentEndMs = 0L
     private var currentSegStartMs = -1L
     private var interimTranscript = ""
@@ -69,7 +74,6 @@ class KuliahVaultController(
     private var speechRecognizer: SpeechRecognizer? = null
     private var timerTextView: TextView? = null
     private var liveTranscriptTextView: TextView? = null
-    private var recordActionBtn: Button? = null
 
     // Board state
     private var boardCourseKey: String = "umum"
@@ -445,13 +449,6 @@ class KuliahVaultController(
         }.start()
     }
 
-    /**
-     * Structured 4-Tab Study Reader:
-     * 1. Intisari (Poin Kunci TF-IDF)
-     * 2. Rumus (Kartu Rumus + Keterangan Variabel + Simpan Bank Rumus)
-     * 3. Glosarium (Definisi Istilah Penting)
-     * 4. Materi Bab (Struktur Bab & Paragraf Bersih)
-     */
     fun showPdfReaderDialog(pdfId: Long, highlightQuery: String = "") {
         val pdf = db.getVaultPdf(pdfId) ?: return
         val parsed = KuliahVaultEngine.parseAnalysisJson(pdf.analysisJson)
@@ -467,7 +464,6 @@ class KuliahVaultController(
             setBackgroundColor(Color.parseColor("#F8FAFC"))
         }
 
-        // Top Meta Bar
         val metaRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -488,7 +484,6 @@ class KuliahVaultController(
         root.addView(metaRow)
         root.addView(space(8))
 
-        // Segmented Tab Strip
         var activeSubTab = if (highlightQuery.isNotBlank()) 3 else 0
         val tabLabels = listOf(
             "Intisari (${analysis.summary.size})",
@@ -789,13 +784,18 @@ class KuliahVaultController(
             .show()
     }
 
-    // ==================== 2. TAB REKAM DOSEN & TRANSKRIP ====================
+    // ==================== 2. TAB REKAM DOSEN & TRANSKRIP PRO ====================
+
+    private fun currentElapsedMs(): Long {
+        if (!isRecording) return 0L
+        return if (isPaused) accumulatedRecordMs else accumulatedRecordMs + (System.currentTimeMillis() - activeSegmentStartEpochMs)
+    }
 
     fun renderRecordTab(container: LinearLayout) {
         activeTabRenderer = { renderRecordTab(container) }
         container.removeAllViews()
 
-        container.addView(sectionHeader("Rekam Dosen & Transkrip", "Rekam penjelasan dosen dengan penanda waktu otomatis"))
+        container.addView(sectionHeader("Rekam Dosen & Transkrip AI", "Korektor istilah Teknik Industri, tanda baca otomatis & penanda waktu"))
         container.addView(space(10))
 
         container.addView(courseHorizontalPicker(recordCourseKey, enabled = !isRecording) { chosen ->
@@ -804,13 +804,14 @@ class KuliahVaultController(
         })
         container.addView(space(10))
 
+        // Recorder Card
         val recCard = glassCard()
         val modeRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         val modeLabel = TextView(activity).apply {
-            text = if (recordModeStt) "Mode: Transkrip Suara Otomatis (ID)" else "Mode: Rekam Audio HD (.m4a)"
+            text = if (recordModeStt) "Mode: Transkrip Cerdas + Korektor TI (ID/EN)" else "Mode: Rekam Audio HD (.m4a)"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(accentTextColor())
@@ -829,29 +830,61 @@ class KuliahVaultController(
         modeRow.addView(modeLabel)
         modeRow.addView(switchModeBtn)
         recCard.addView(modeRow)
-        recCard.addView(space(8))
+        recCard.addView(space(6))
 
         timerTextView = TextView(activity).apply {
-            text = if (isRecording) formatClock(System.currentTimeMillis() - recordStartMs) else "00:00"
-            textSize = 36f
+            val statusTag = when {
+                !isRecording -> ""
+                isPaused -> " (JEDA)"
+                else -> " ●"
+            }
+            text = "${formatClock(currentElapsedMs())}$statusTag"
+            textSize = 34f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(textColor())
+            setTextColor(if (isPaused) Color.parseColor("#D97706") else textColor())
             gravity = Gravity.CENTER
         }
         recCard.addView(timerTextView)
         recCard.addView(space(10))
 
-        recordActionBtn = glassActionButton(
-            if (isRecording) "■ Berhenti & Simpan Rekaman" else "● Mulai Rekam Dosen",
-            if (isRecording) "#DC2626" else "#4F46E5"
-        ) {
-            if (isRecording) {
-                stopRecordingAndSave(container)
-            } else {
+        if (!isRecording) {
+            val startBtn = glassActionButton("● Mulai Rekam Penjelasan Dosen", "#4F46E5") {
                 startRecordingFlow(container)
             }
+            recCard.addView(startBtn, matchWrap())
+        } else {
+            val ctrlRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+            val pauseResumeBtn = glassActionButton(
+                if (isPaused) "▶ Lanjut" else "⏸ Jeda",
+                if (isPaused) "#0284C7" else "#D97706"
+            ) {
+                if (isPaused) resumeRecordingFlow(container) else pauseRecordingFlow(container)
+            }
+            val stopSaveBtn = glassActionButton("■ Simpan", "#DC2626") {
+                stopRecordingAndSave(container)
+            }
+            ctrlRow.addView(pauseResumeBtn, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5) })
+            ctrlRow.addView(stopSaveBtn, LinearLayout.LayoutParams(0, dp(42), 1.2f).apply { marginStart = dp(5) })
+            recCard.addView(ctrlRow)
+
+            if (recordModeStt) {
+                recCard.addView(space(8))
+                val quickToolRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+                val bookmarkBtn = glassActionButton("⭐ Tandai Momen Penting", "#2E8B57") {
+                    val nowRel = currentElapsedMs()
+                    liveSegments.add(RecordingSegment("⭐ Poin penting ditandai mahasiswa", nowRel, nowRel))
+                    lastSegmentEndMs = nowRel
+                    liveTranscriptTextView?.text = buildLiveTranscriptPreview()
+                    Toast.makeText(activity, "Ditandai di ${formatClock(nowRel)}", Toast.LENGTH_SHORT).show()
+                }
+                val noteStampBtn = glassActionButton("+ Catatan Cepat", "#334155") {
+                    showQuickNoteDuringRecordingDialog()
+                }
+                quickToolRow.addView(bookmarkBtn, LinearLayout.LayoutParams(0, dp(38), 1.2f).apply { marginEnd = dp(5) })
+                quickToolRow.addView(noteStampBtn, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginStart = dp(5) })
+                recCard.addView(quickToolRow)
+            }
         }
-        recCard.addView(recordActionBtn, matchWrap())
 
         if (isRecording || liveSegments.isNotEmpty()) {
             recCard.addView(space(10))
@@ -859,13 +892,14 @@ class KuliahVaultController(
                 text = buildLiveTranscriptPreview()
                 textSize = 13f
                 setTextColor(textColor())
-                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setPadding(dp(12), dp(10), dp(12), dp(10))
                 background = LiquidGlassKit.glassSurface(activity, isDark(), 14f, strongRim = false)
             }
             recCard.addView(liveTranscriptTextView)
         }
         container.addView(recCard, matchWrapBottom(14))
 
+        // Saved Recordings List
         val course = KuliahVaultEngine.courseByKey(recordCourseKey)
         val recordings = db.listVaultRecordings(recordCourseKey)
         container.addView(TextView(activity).apply {
@@ -880,6 +914,7 @@ class KuliahVaultController(
             container.addView(emptyGlassBox("Belum ada rekaman dosen untuk mata kuliah ini."))
         } else {
             for (rec in recordings) {
+                val analysis = KuliahTranscriptEngine.analyzeLectureTranscript(rec.segments, rec.courseKey)
                 val card = glassCard().apply {
                     setOnClickListener { showRecordingPlayerDialog(rec.id) }
                 }
@@ -898,7 +933,11 @@ class KuliahVaultController(
                     setTextColor(textColor())
                 })
                 info.addView(TextView(activity).apply {
-                    val segInfo = if (rec.segments.isNotEmpty()) "${rec.segments.size} kalimat transkrip" else "Audio HD"
+                    val segInfo = if (rec.segments.isNotEmpty()) {
+                        "${rec.segments.size} segmen • ${analysis.chapters.size} bagian • ${analysis.examCues.size} kisi-kisi"
+                    } else {
+                        "Audio HD"
+                    }
                     text = "${formatClock(rec.durationMs)} • $segInfo"
                     textSize = 12f
                     setTextColor(subTextColor())
@@ -919,6 +958,26 @@ class KuliahVaultController(
         }
     }
 
+    private fun showQuickNoteDuringRecordingDialog() {
+        val stampMs = currentElapsedMs()
+        val input = EditText(activity).apply {
+            hint = "Ketik rumus / istilah penting dosen saat ini..."
+        }
+        AlertDialog.Builder(activity)
+            .setTitle("Catatan Cepat [${formatClock(stampMs)}]")
+            .setView(input)
+            .setPositiveButton("Tempel ke Transkrip") { _, _ ->
+                val v = input.text.toString().trim()
+                if (v.isNotEmpty()) {
+                    liveSegments.add(RecordingSegment("[CATATAN] $v", stampMs, stampMs))
+                    lastSegmentEndMs = stampMs
+                    liveTranscriptTextView?.text = buildLiveTranscriptPreview()
+                }
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
     private fun startRecordingFlow(container: LinearLayout) {
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             onRequestAudioPermission()
@@ -929,8 +988,11 @@ class KuliahVaultController(
         interimTranscript = ""
         lastSegmentEndMs = 0L
         currentSegStartMs = -1L
-        recordStartMs = System.currentTimeMillis()
+        sessionCreatedEpochMs = System.currentTimeMillis()
+        accumulatedRecordMs = 0L
+        activeSegmentStartEpochMs = sessionCreatedEpochMs
         isRecording = true
+        isPaused = false
 
         if (recordModeStt && SpeechRecognizer.isRecognitionAvailable(activity)) {
             startSpeechSession()
@@ -939,6 +1001,49 @@ class KuliahVaultController(
             startAudioFileRecorder()
         }
         startTimerTicker()
+        renderRecordTab(container)
+    }
+
+    private fun pauseRecordingFlow(container: LinearLayout) {
+        if (!isRecording || isPaused) return
+        accumulatedRecordMs += (System.currentTimeMillis() - activeSegmentStartEpochMs)
+        isPaused = true
+
+        if (recordModeStt) {
+            flushInterimUtterance(accumulatedRecordMs)
+            try {
+                speechRecognizer?.stopListening()
+                speechRecognizer?.destroy()
+            } catch (_: Exception) {
+            }
+            speechRecognizer = null
+        } else {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    mediaRecorder?.pause()
+                }
+            } catch (_: Exception) {
+            }
+        }
+        renderRecordTab(container)
+    }
+
+    private fun resumeRecordingFlow(container: LinearLayout) {
+        if (!isRecording || !isPaused) return
+        activeSegmentStartEpochMs = System.currentTimeMillis()
+        isPaused = false
+        currentSegStartMs = -1L
+
+        if (recordModeStt) {
+            startSpeechSession()
+        } else {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    mediaRecorder?.resume()
+                }
+            } catch (_: Exception) {
+            }
+        }
         renderRecordTab(container)
     }
 
@@ -953,10 +1058,10 @@ class KuliahVaultController(
                 @Suppress("DEPRECATION")
                 MediaRecorder()
             }
-            mr.setAudioSource(MediaRecorder.AudioSource.MIC)
+            mr.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setAudioEncodingBitRate(96000)
+            mr.setAudioEncodingBitRate(128000)
             mr.setAudioSamplingRate(44100)
             mr.setOutputFile(outFile.absolutePath)
             mr.prepare()
@@ -968,8 +1073,21 @@ class KuliahVaultController(
         }
     }
 
+    private fun flushInterimUtterance(endMs: Long) {
+        if (interimTranscript.isNotBlank()) {
+            val cleaned = KuliahTranscriptEngine.cleanAndFormatUtterance(interimTranscript, recordCourseKey)
+            if (cleaned.isNotEmpty()) {
+                val start = if (currentSegStartMs >= 0L) currentSegStartMs else lastSegmentEndMs
+                liveSegments.add(RecordingSegment(cleaned, start, endMs))
+                lastSegmentEndMs = endMs
+            }
+            interimTranscript = ""
+            currentSegStartMs = -1L
+        }
+    }
+
     private fun startSpeechSession() {
-        if (!isRecording) return
+        if (!isRecording || isPaused) return
         try {
             speechRecognizer?.destroy()
             val sr = SpeechRecognizer.createSpeechRecognizer(activity)
@@ -977,31 +1095,35 @@ class KuliahVaultController(
                 override fun onReadyForSpeech(params: Bundle?) {}
                 override fun onBeginningOfSpeech() {
                     if (currentSegStartMs < 0L) {
-                        currentSegStartMs = (System.currentTimeMillis() - recordStartMs).coerceAtLeast(lastSegmentEndMs)
+                        currentSegStartMs = currentElapsedMs().coerceAtLeast(lastSegmentEndMs)
                     }
                 }
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {}
                 override fun onError(error: Int) {
-                    if (isRecording) {
-                        mainHandler.postDelayed({ startSpeechSession() }, 350L)
+                    if (isRecording && !isPaused) {
+                        val delay = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 500L else 220L
+                        mainHandler.postDelayed({ startSpeechSession() }, delay)
                     }
                 }
                 override fun onResults(results: Bundle?) {
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val text = matches?.firstOrNull()?.trim().orEmpty()
-                    val nowRel = System.currentTimeMillis() - recordStartMs
-                    if (text.isNotEmpty()) {
-                        val start = if (currentSegStartMs >= 0L) currentSegStartMs else (nowRel - 1500L).coerceAtLeast(lastSegmentEndMs)
-                        liveSegments.add(RecordingSegment(text, start, nowRel))
-                        lastSegmentEndMs = nowRel
+                    val rawText = matches?.firstOrNull()?.trim().orEmpty()
+                    val nowRel = currentElapsedMs()
+                    if (rawText.isNotEmpty()) {
+                        val formatted = KuliahTranscriptEngine.cleanAndFormatUtterance(rawText, recordCourseKey)
+                        if (formatted.isNotEmpty()) {
+                            val start = if (currentSegStartMs >= 0L) currentSegStartMs else (nowRel - 1500L).coerceAtLeast(lastSegmentEndMs)
+                            liveSegments.add(RecordingSegment(formatted, start, nowRel))
+                            lastSegmentEndMs = nowRel
+                        }
                     }
                     currentSegStartMs = -1L
                     interimTranscript = ""
                     liveTranscriptTextView?.text = buildLiveTranscriptPreview()
-                    if (isRecording) {
-                        mainHandler.postDelayed({ startSpeechSession() }, 250L)
+                    if (isRecording && !isPaused) {
+                        mainHandler.postDelayed({ startSpeechSession() }, 180L)
                     }
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
@@ -1009,7 +1131,7 @@ class KuliahVaultController(
                     val text = matches?.firstOrNull()?.trim().orEmpty()
                     if (text.isNotEmpty()) {
                         if (currentSegStartMs < 0L) {
-                            currentSegStartMs = (System.currentTimeMillis() - recordStartMs).coerceAtLeast(lastSegmentEndMs)
+                            currentSegStartMs = currentElapsedMs().coerceAtLeast(lastSegmentEndMs)
                         }
                         interimTranscript = text
                         liveTranscriptTextView?.text = buildLiveTranscriptPreview()
@@ -1020,8 +1142,11 @@ class KuliahVaultController(
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "id-ID")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
             }
             sr.startListening(intent)
             speechRecognizer = sr
@@ -1032,8 +1157,9 @@ class KuliahVaultController(
     }
 
     private fun stopRecordingAndSave(container: LinearLayout) {
+        val totalDuration = currentElapsedMs().coerceAtLeast(1000L)
         isRecording = false
-        val totalDuration = (System.currentTimeMillis() - recordStartMs).coerceAtLeast(1000L)
+        isPaused = false
 
         try {
             speechRecognizer?.stopListening()
@@ -1042,14 +1168,13 @@ class KuliahVaultController(
         }
         speechRecognizer = null
 
-        if (interimTranscript.isNotBlank()) {
-            val start = if (currentSegStartMs >= 0L) currentSegStartMs else lastSegmentEndMs
-            liveSegments.add(RecordingSegment(interimTranscript.trim(), start, totalDuration))
-            interimTranscript = ""
-        }
+        flushInterimUtterance(totalDuration)
 
         try {
             mediaRecorder?.stop()
+        } catch (_: Exception) {
+        }
+        try {
             mediaRecorder?.release()
         } catch (_: Exception) {
         }
@@ -1066,15 +1191,20 @@ class KuliahVaultController(
             Toast.makeText(activity, "Tidak ada suara atau transkrip yang terekam.", Toast.LENGTH_SHORT).show()
         } else {
             val c = KuliahVaultEngine.courseByKey(recordCourseKey)
-            val stamp = SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(recordStartMs))
-            db.insertVaultRecording(
+            val stamp = SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(sessionCreatedEpochMs))
+            val savedId = db.insertVaultRecording(
                 courseKey = recordCourseKey,
                 title = "${c.name} - $stamp",
                 parts = recordedParts.toList(),
                 durationMs = totalDuration,
                 segments = liveSegments.toList()
             )
-            Toast.makeText(activity, "Rekaman tersimpan di ${c.name}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "Transkrip kuliah tersimpan!", Toast.LENGTH_SHORT).show()
+            liveSegments.clear()
+            recordedParts.clear()
+            renderRecordTab(container)
+            showRecordingPlayerDialog(savedId)
+            return
         }
         liveSegments.clear()
         recordedParts.clear()
@@ -1085,7 +1215,8 @@ class KuliahVaultController(
         mainHandler.postDelayed(object : Runnable {
             override fun run() {
                 if (!isRecording) return
-                timerTextView?.text = formatClock(System.currentTimeMillis() - recordStartMs)
+                val tag = if (isPaused) " (JEDA)" else " ●"
+                timerTextView?.text = "${formatClock(currentElapsedMs())}$tag"
                 mainHandler.postDelayed(this, 500L)
             }
         }, 500L)
@@ -1093,31 +1224,43 @@ class KuliahVaultController(
 
     private fun buildLiveTranscriptPreview(): String {
         val sb = StringBuilder()
-        liveSegments.takeLast(8).forEach { seg ->
-            sb.append("[${formatClock(seg.startMs)}] ${seg.text}\n")
+        liveSegments.takeLast(7).forEach { seg ->
+            sb.append("[${formatClock(seg.startMs)}] ${seg.text}\n\n")
         }
         if (interimTranscript.isNotBlank()) {
             sb.append("... $interimTranscript")
         }
-        return sb.toString().trim().ifEmpty { "Mendengarkan suara dosen..." }
+        return sb.toString().trim().ifEmpty {
+            if (isPaused) "Rekaman dijeda. Tekan 'Lanjut' saat dosen mulai menjelaskan lagi."
+            else "Mendengarkan & merapikan istilah kuliah secara otomatis..."
+        }
     }
 
     private fun showRecordingOptionsDialog(rec: VaultRecording, container: LinearLayout) {
-        val opts = arrayOf("Putar & Baca Transkrip", "Ganti Nama", "Pindahkan ke Mata Kuliah Lain", "Hapus Rekaman")
+        val opts = arrayOf(
+            "Buka Pembaca & Ringkasan Kuliah",
+            "Ekspor Transkrip ke PDF",
+            "Bagikan Ringkasan ke WhatsApp",
+            "Ganti Nama",
+            "Pindahkan ke Mata Kuliah Lain",
+            "Hapus Rekaman"
+        )
         AlertDialog.Builder(activity)
             .setTitle(rec.title)
             .setItems(opts) { _, which ->
                 when (which) {
                     0 -> showRecordingPlayerDialog(rec.id)
-                    1 -> showRenameDialog("Ganti Nama Rekaman", rec.title) { newTitle ->
+                    1 -> exportRecordingToPdf(rec)
+                    2 -> shareRecordingToWhatsApp(rec)
+                    3 -> showRenameDialog("Ganti Nama Rekaman", rec.title) { newTitle ->
                         db.renameVaultRecording(rec.id, newTitle)
                         renderRecordTab(container)
                     }
-                    2 -> showMoveCourseDialog(rec.courseKey) { newKey ->
+                    4 -> showMoveCourseDialog(rec.courseKey) { newKey ->
                         db.moveVaultRecording(rec.id, newKey)
                         renderRecordTab(container)
                     }
-                    3 -> {
+                    5 -> {
                         rec.parts.forEach { File(it.uri).delete() }
                         db.deleteVaultRecording(rec.id)
                         renderRecordTab(container)
@@ -1127,9 +1270,65 @@ class KuliahVaultController(
             .show()
     }
 
+    private fun exportRecordingToPdf(rec: VaultRecording) {
+        try {
+            val courseName = KuliahVaultEngine.courseByKey(rec.courseKey).name
+            val outFile = KuliahTranscriptEngine.exportTranscriptPdf(activity, rec, courseName)
+            val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", outFile)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Transkrip ${rec.title}")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(Intent.createChooser(intent, "Simpan atau Bagikan PDF Transkrip"))
+        } catch (e: Exception) {
+            Toast.makeText(activity, "Gagal mengekspor PDF: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun shareRecordingToWhatsApp(rec: VaultRecording) {
+        val analysis = KuliahTranscriptEngine.analyzeLectureTranscript(rec.segments, rec.courseKey)
+        val sb = StringBuilder()
+        sb.append("*RANGKUMAN KULIAH: ${rec.title}*\n\n")
+        if (analysis.keyPoints.isNotEmpty()) {
+            sb.append("*Poin Inti:*\n")
+            analysis.keyPoints.forEach { sb.append("• $it\n") }
+            sb.append("\n")
+        }
+        if (analysis.examCues.isNotEmpty()) {
+            sb.append("*Kisi-Kisi / Penting:*\n")
+            analysis.examCues.forEach { sb.append("★ $it\n") }
+            sb.append("\n")
+        }
+        if (rec.segments.isNotEmpty()) {
+            sb.append("*Catatan Transkrip:*\n")
+            rec.segments.take(15).forEach { seg ->
+                sb.append("[${formatClock(seg.startMs)}] ${seg.text}\n")
+            }
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, sb.toString().trim())
+        }
+        activity.startActivity(Intent.createChooser(intent, "Bagikan Catatan Kuliah"))
+    }
+
+    /**
+     * 3-Tab Pro Lecture Reader & Audio Player:
+     * 1. Ringkasan & Kisi-Kisi
+     * 2. Transkrip Terstruktur (Per Bagian Topik)
+     * 3. Edit & Koreksi Teks
+     */
     fun showRecordingPlayerDialog(recordingId: Long) {
         val rec = db.getVaultRecording(recordingId) ?: return
+        val analysis = KuliahTranscriptEngine.analyzeLectureTranscript(rec.segments, rec.courseKey)
+
         var player: MediaPlayer? = null
+        var seekTicker: Runnable? = null
+        var speedIdx = 0
+        val speeds = listOf(1.0f, 1.25f, 1.5f)
+
         val audioPart = rec.parts.firstOrNull { File(it.uri).exists() }
         if (audioPart != null) {
             try {
@@ -1142,63 +1341,319 @@ class KuliahVaultController(
             }
         }
 
-        val scroll = ScrollView(activity)
-        val box = LinearLayout(activity).apply {
+        val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setBackgroundColor(Color.parseColor("#F8FAFC"))
         }
-        box.addView(TextView(activity).apply {
-            text = "${KuliahVaultEngine.courseByKey(rec.courseKey).name} • Durasi ${formatClock(rec.durationMs)}"
-            textSize = 12f
+
+        // Top Actions Row (Export PDF & Share WA)
+        val topBar = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        topBar.addView(TextView(activity).apply {
+            text = "${KuliahVaultEngine.courseByKey(rec.courseKey).name} • ${formatClock(rec.durationMs)}"
+            textSize = 11.5f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#4F46E5"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        box.addView(space(10))
+        topBar.addView(Button(activity).apply {
+            text = "PDF"
+            isAllCaps = false
+            textSize = 11f
+            setOnClickListener { exportRecordingToPdf(rec) }
+        })
+        topBar.addView(Button(activity).apply {
+            text = "Share"
+            isAllCaps = false
+            textSize = 11f
+            setOnClickListener { shareRecordingToWhatsApp(rec) }
+        })
+        root.addView(topBar)
 
+        // Audio Player Bar (if audio file exists)
         if (player != null) {
+            val audioBox = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#EEF2FF"))
+                    cornerRadius = dp(12).toFloat()
+                }
+            }
+            val timePosLabel = TextView(activity).apply {
+                text = "00:00 / ${formatClock(player.duration.toLong())}"
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#312E81"))
+            }
+            val seekBar = SeekBar(activity).apply {
+                max = player.duration.coerceAtLeast(100)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                        if (fromUser) {
+                            player.seekTo(progress)
+                            timePosLabel.text = "${formatClock(progress.toLong())} / ${formatClock(player.duration.toLong())}"
+                        }
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            }
+            val pControls = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
             val playBtn = Button(activity).apply {
-                text = "▶ Putar Audio"
+                text = "▶ Putar"
                 isAllCaps = false
+                textSize = 11f
                 setOnClickListener {
                     if (player.isPlaying) {
                         player.pause()
-                        text = "▶ Lanjutkan Audio"
+                        text = "▶ Lanjut"
                     } else {
                         player.start()
-                        text = "⏸ Jeda Audio"
+                        text = "⏸ Jeda"
                     }
                 }
             }
-            box.addView(playBtn)
-            box.addView(space(10))
+            val speedBtn = Button(activity).apply {
+                text = "1.0x"
+                isAllCaps = false
+                textSize = 11f
+                setOnClickListener {
+                    speedIdx = (speedIdx + 1) % speeds.size
+                    val sp = speeds[speedIdx]
+                    text = "${sp}x"
+                    try {
+                        player.playbackParams = PlaybackParams().setSpeed(sp)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            pControls.addView(playBtn)
+            pControls.addView(speedBtn)
+            audioBox.addView(timePosLabel)
+            audioBox.addView(seekBar)
+            audioBox.addView(pControls)
+            root.addView(audioBox, matchWrapBottom(8))
+
+            seekTicker = object : Runnable {
+                override fun run() {
+                    try {
+                        if (player.isPlaying) {
+                            val cur = player.currentPosition
+                            seekBar.progress = cur
+                            timePosLabel.text = "${formatClock(cur.toLong())} / ${formatClock(player.duration.toLong())}"
+                        }
+                    } catch (_: Exception) {
+                    }
+                    mainHandler.postDelayed(this, 400L)
+                }
+            }
+            mainHandler.post(seekTicker)
         }
 
-        box.addView(boldLabel("Transkrip & Penanda Waktu (${rec.segments.size})"))
-        if (rec.segments.isEmpty()) {
-            box.addView(mutedLabel("Sesi ini direkam dalam mode audio tanpa transkrip teks."))
-        } else {
-            rec.segments.forEach { seg ->
-                val segView = TextView(activity).apply {
-                    text = "[${formatClock(seg.startMs)}]  ${seg.text}"
-                    textSize = 13f
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
-                    if (player != null) {
-                        setOnClickListener {
-                            player.seekTo(seg.startMs.toInt().coerceIn(0, player.duration))
-                            if (!player.isPlaying) player.start()
-                            Toast.makeText(activity, "Melompat ke ${formatClock(seg.startMs)}", Toast.LENGTH_SHORT).show()
+        // 3-Tab Strip
+        var activeSubTab = 0
+        val tabLabels = listOf(
+            "Ringkasan (${analysis.keyPoints.size + analysis.examCues.size})",
+            "Transkrip (${analysis.chapters.size} Bagian)",
+            "Edit Teks"
+        )
+        val tabScroll = HorizontalScrollView(activity).apply { isHorizontalScrollBarEnabled = false }
+        val tabRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+        val tabViews = mutableListOf<TextView>()
+
+        val bodyScroll = ScrollView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(380))
+        }
+        val bodyBox = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(10))
+        }
+        bodyScroll.addView(bodyBox)
+
+        fun renderTranscriptBody() {
+            tabViews.forEachIndexed { i, tv ->
+                val sel = i == activeSubTab
+                tv.setTextColor(if (sel) Color.WHITE else Color.parseColor("#1E293B"))
+                tv.background = GradientDrawable().apply {
+                    setColor(Color.parseColor(if (sel) "#4F46E5" else "#E2E8F0"))
+                    cornerRadius = dp(16).toFloat()
+                }
+            }
+            bodyBox.removeAllViews()
+
+            when (activeSubTab) {
+                0 -> {
+                    if (analysis.examCues.isNotEmpty()) {
+                        bodyBox.addView(boldLabel("Kisi-Kisi & Penekanan Dosen (${analysis.examCues.size})"))
+                        bodyBox.addView(space(6))
+                        analysis.examCues.forEach { cue ->
+                            bodyBox.addView(
+                                readerCard("#FEF3C7", "#F59E0B", "PENTING / KISI-KISI", cue, "#B45309"),
+                                matchWrapBottom(8)
+                            )
+                        }
+                    }
+                    if (analysis.bookmarks.isNotEmpty()) {
+                        bodyBox.addView(boldLabel("Momen Ditandai Mahasiswa (${analysis.bookmarks.size})"))
+                        bodyBox.addView(space(6))
+                        analysis.bookmarks.forEach { bm ->
+                            bodyBox.addView(
+                                readerCard("#ECFDF5", "#6EE7B7", "PENANDA [${formatClock(bm.startMs)}]", bm.text, "#047857"),
+                                matchWrapBottom(8)
+                            )
+                        }
+                    }
+                    if (analysis.keyPoints.isNotEmpty()) {
+                        bodyBox.addView(boldLabel("Intisari Penjelasan Dosen"))
+                        bodyBox.addView(space(6))
+                        analysis.keyPoints.forEachIndexed { idx, kp ->
+                            bodyBox.addView(
+                                readerCard("#EEF2FF", "#C7D2FE", "POIN INTI #${idx + 1}", kp, "#4338CA"),
+                                matchWrapBottom(8)
+                            )
+                        }
+                    }
+                    if (analysis.examCues.isEmpty() && analysis.bookmarks.isEmpty() && analysis.keyPoints.isEmpty()) {
+                        bodyBox.addView(readerCard("#FFFFFF", "#CBD5E1", "Ringkasan Kuliah", "Belum ada transkrip teks yang cukup untuk diringkas."))
+                    }
+                }
+
+                1 -> {
+                    if (analysis.chapters.isEmpty()) {
+                        bodyBox.addView(readerCard("#FFFFFF", "#CBD5E1", "Transkrip Kuliah", "Sesi ini direkam dalam mode Audio HD tanpa transkrip otomatis."))
+                    } else {
+                        analysis.chapters.forEach { ch ->
+                            val chCard = LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(dp(12), dp(10), dp(12), dp(10))
+                                background = GradientDrawable().apply {
+                                    setColor(Color.WHITE)
+                                    setStroke(dp(1), Color.parseColor("#CBD5E1"))
+                                    cornerRadius = dp(14).toFloat()
+                                }
+                            }
+                            chCard.addView(TextView(activity).apply {
+                                text = "[${formatClock(ch.startMs)}] ${ch.title}"
+                                textSize = 13f
+                                setTypeface(null, Typeface.BOLD)
+                                setTextColor(Color.parseColor("#1E1B4B"))
+                            })
+                            chCard.addView(space(6))
+                            ch.segments.forEach { seg ->
+                                val isHighlight = seg.text.startsWith("[KISI-KISI]") || seg.text.startsWith("⭐") || seg.text.startsWith("[CATATAN]")
+                                val segView = TextView(activity).apply {
+                                    text = "[${formatClock(seg.startMs)}]  ${seg.text}"
+                                    textSize = 13f
+                                    setTextColor(Color.parseColor(if (isHighlight) "#B45309" else "#1E293B"))
+                                    if (isHighlight) setTypeface(null, Typeface.BOLD)
+                                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                                    setTextIsSelectable(true)
+                                    if (player != null) {
+                                        setOnClickListener {
+                                            player.seekTo(seg.startMs.toInt().coerceIn(0, player.duration))
+                                            if (!player.isPlaying) player.start()
+                                            Toast.makeText(activity, "Melompat ke ${formatClock(seg.startMs)}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                                chCard.addView(segView)
+                            }
+                            bodyBox.addView(chCard, matchWrapBottom(10))
                         }
                     }
                 }
-                box.addView(segView)
+
+                2 -> {
+                    val editors = mutableListOf<Pair<RecordingSegment, EditText>>()
+                    if (rec.segments.isEmpty()) {
+                        val manualIn = EditText(activity).apply {
+                            hint = "Tulis catatan transkrip manual untuk rekaman ini..."
+                            minLines = 5
+                        }
+                        bodyBox.addView(manualIn)
+                        bodyBox.addView(Button(activity).apply {
+                            text = "Simpan Catatan Manual"
+                            isAllCaps = false
+                            setOnClickListener {
+                                val lines = manualIn.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
+                                val newSegs = lines.mapIndexed { idx, ln ->
+                                    RecordingSegment(KuliahTranscriptEngine.cleanAndFormatUtterance(ln, rec.courseKey), idx * 5000L, (idx + 1) * 5000L)
+                                }
+                                db.updateVaultRecordingTranscript(rec.id, newSegs)
+                                Toast.makeText(activity, "Transkrip disimpan!", Toast.LENGTH_SHORT).show()
+                                activeTabRenderer?.invoke()
+                            }
+                        })
+                    } else {
+                        rec.segments.forEach { seg ->
+                            val row = LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(0, dp(4), 0, dp(6))
+                            }
+                            row.addView(TextView(activity).apply {
+                                text = "[${formatClock(seg.startMs)}]"
+                                textSize = 11f
+                                setTypeface(null, Typeface.BOLD)
+                                setTextColor(Color.parseColor("#4F46E5"))
+                            })
+                            val ed = EditText(activity).apply {
+                                setText(seg.text)
+                                textSize = 13f
+                            }
+                            editors.add(seg to ed)
+                            row.addView(ed)
+                            bodyBox.addView(row)
+                        }
+                        bodyBox.addView(Button(activity).apply {
+                            text = "Simpan Koreksi Transkrip"
+                            isAllCaps = false
+                            setOnClickListener {
+                                val updated = editors.map { (orig, ed) ->
+                                    orig.copy(text = ed.text.toString().trim().ifEmpty { orig.text })
+                                }
+                                db.updateVaultRecordingTranscript(rec.id, updated)
+                                Toast.makeText(activity, "Perubahan transkrip tersimpan!", Toast.LENGTH_SHORT).show()
+                                activeTabRenderer?.invoke()
+                            }
+                        })
+                    }
+                }
             }
         }
 
-        scroll.addView(box)
+        tabLabels.forEachIndexed { idx, label ->
+            val tv = TextView(activity).apply {
+                text = label
+                textSize = 11.5f
+                setTypeface(null, Typeface.BOLD)
+                setPadding(dp(12), dp(7), dp(12), dp(7))
+                setOnClickListener {
+                    activeSubTab = idx
+                    renderTranscriptBody()
+                }
+            }
+            tabViews.add(tv)
+            tabRow.addView(tv, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(6) })
+        }
+
+        tabScroll.addView(tabRow)
+        root.addView(tabScroll)
+        root.addView(space(6))
+        root.addView(bodyScroll)
+        renderTranscriptBody()
+
         AlertDialog.Builder(activity)
             .setTitle(rec.title)
-            .setView(scroll)
+            .setView(root)
             .setOnDismissListener {
+                seekTicker?.let { mainHandler.removeCallbacks(it) }
                 try {
                     player?.stop()
                     player?.release()
@@ -1365,7 +1820,6 @@ class KuliahVaultController(
         }
         box.addView(sharpToggleBtn)
 
-        // Otomatis jalankan Anti-Silau saat preview dibuka agar hasil langsung tajam
         Thread {
             try {
                 val out = KuliahVaultEngine.enhanceWhiteboard(activity, sourceUri)
@@ -1681,8 +2135,15 @@ class KuliahVaultController(
                 cards.add("Intisari #${idx + 1} (${p.title})" to s)
             }
         }
+        // Tambahkan kisi-kisi dari rekaman dosen ke Flashcard
+        for (r in db.listVaultRecordings(courseKey)) {
+            val lec = KuliahTranscriptEngine.analyzeLectureTranscript(r.segments, courseKey)
+            lec.examCues.forEach { cue ->
+                cards.add("Kisi-Kisi Dosen (${r.title})" to cue)
+            }
+        }
         if (cards.isEmpty()) {
-            Toast.makeText(activity, "Impor PDF di ${course.name} terlebih dahulu untuk membuat Flashcard otomatis.", Toast.LENGTH_LONG).show()
+            Toast.makeText(activity, "Impor PDF atau rekam kuliah di ${course.name} terlebih dahulu untuk membuat Flashcard otomatis.", Toast.LENGTH_LONG).show()
             return
         }
 
@@ -2004,6 +2465,37 @@ class KuliahVaultController(
 
     private fun formatDateTime(ts: Long): String =
         SimpleDateFormat("dd MMM • HH:mm", Locale.getDefault()).format(Date(ts))
+
+    private fun readerCard(
+        bgHex: String,
+        borderHex: String,
+        badgeTitle: String,
+        content: String,
+        accentHex: String = "#334155"
+    ): LinearLayout {
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(bgHex))
+                setStroke(dp(1), Color.parseColor(borderHex))
+                cornerRadius = dp(14).toFloat()
+            }
+            addView(TextView(activity).apply {
+                text = badgeTitle
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor(accentHex))
+            })
+            addView(TextView(activity).apply {
+                text = content
+                textSize = 13f
+                setTextColor(Color.parseColor("#0F172A"))
+                setTextIsSelectable(true)
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+    }
 
     private fun boldLabel(text: String) = TextView(activity).apply {
         this.text = text
