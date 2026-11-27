@@ -33,13 +33,14 @@ class AlarmReceiver : BroadcastReceiver() {
                     startMinute = 0,
                     endHour = 0,
                     endMinute = 0,
-                    courseName = "Simulasi Tes Absen BOC",
+                    courseName = "Simulasi Tes Absen E-Learning",
                     room = "Online",
                     classMode = "Online",
                     ringEnabled = true,
                     vibrateEnabled = true,
                     notifEnabled = true,
-                    active = true
+                    active = true,
+                    courseUrl = "https://elearning.ubpkarawang.ac.id/login/index.php"
                 )
             } else {
                 db.getScheduleById(scheduleId) ?: return
@@ -62,6 +63,7 @@ class AlarmReceiver : BroadcastReceiver() {
             val notifId = if (scheduleId == AlarmScheduler.TEST_SCHEDULE_ID) 999 else (schedule.id * 10 + if (isPreReminder) 2 else 1).toInt()
 
             if (isPreReminder) {
+                DynamicIslandService.show(context, schedule.id, isPreReminder = true)
                 if (notifEnabled) {
                     val openMainPi = PendingIntent.getActivity(
                         context,
@@ -72,7 +74,7 @@ class AlarmReceiver : BroadcastReceiver() {
                     val preNotif = NotificationCompat.Builder(context, "absenguard_alarm")
                         .setSmallIcon(R.drawable.ic_launcher)
                         .setContentTitle("10 Menit Lagi: ${schedule.courseName}")
-                        .setContentText("Ruang ${schedule.room} (${schedule.classMode}) • Siapkan absen BOC")
+                        .setContentText("Ruang ${schedule.room} (${schedule.classMode}) • Siapkan absen E-Learning")
                         .setPriority(NotificationCompat.PRIORITY_HIGH)
                         .setCategory(NotificationCompat.CATEGORY_REMINDER)
                         .setAutoCancel(true)
@@ -83,6 +85,8 @@ class AlarmReceiver : BroadcastReceiver() {
                 AlarmScheduler.scheduleAll(context)
                 return
             }
+
+            DynamicIslandService.show(context, schedule.id, isPreReminder = false)
 
             val fullScreenIntent = Intent(context, AlarmAlertActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
