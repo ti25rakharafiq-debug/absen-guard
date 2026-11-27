@@ -204,14 +204,14 @@ class SiptPortalActivity : AppCompatActivity() {
         val db = ScheduleDbHelper(this)
         val username = db.getSetting("sipt_username", "ti25.rakharafiq@mhs.ubpkarawang.ac.id")
             .replace("\\", "\\\\").replace("'", "\\'")
-        val password = db.getSetting("sipt_password", "ubpk2024")
+        val password = db.getSetting("sipt_password", "Buana0000!")
             .replace("\\", "\\\\").replace("'", "\\'")
         val script = """
             (function(){
                 var user=document.querySelector('#username, input[name="username"], input[name*="email"], input[type="email"], input[type="text"]');
                 var pass=document.querySelector('#password, input[name="password"], input[type="password"]');
                 function setField(el,value){
-                    if(el && (el.value===null || el.value.trim()==='')){
+                    if(el){
                         el.value=value;
                         el.dispatchEvent(new Event('input',{bubbles:true}));
                         el.dispatchEvent(new Event('change',{bubbles:true}));
