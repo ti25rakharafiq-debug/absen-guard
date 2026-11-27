@@ -94,6 +94,14 @@ class KuliahVaultController(
 
     private var activeTabRenderer: (() -> Unit)? = null
 
+    private data class BatchPdfCandidate(
+        val defaultTitle: String,
+        val file: File,
+        val extraction: PdfExtractionResult,
+        val cls: ClassificationResult,
+        val analysis: TextAnalysisResult
+    )
+
     fun syncDefaultCourseFromSchedule() {
         val next = AlarmScheduler.getNextUpcomingSchedule(activity)
         if (next != null) {
@@ -106,7 +114,7 @@ class KuliahVaultController(
         }
     }
 
-    // ==================== 1. TAB MATERI PDF (NASA-GRADE READER) ====================
+    // ==================== 1. TAB MATERI PDF (BATCH + NASA-GRADE READER) ====================
 
     fun renderPdfTab(container: LinearLayout) {
         activeTabRenderer = { renderPdfTab(container) }
@@ -117,7 +125,7 @@ class KuliahVaultController(
             container.addView(sectionHeader("Materi PDF Kuliah", "Ekstraksi spasial 2D: tabel asli, gambar/diagram, bab & rumus"))
             container.addView(space(12))
 
-            val importBtn = glassActionButton("+ Impor PDF Baru", "#4F46E5") {
+            val importBtn = glassActionButton("+ Impor PDF (Bisa Banyak Sekaligus)", "#4F46E5") {
                 onRequestPickPdf()
             }
             container.addView(importBtn, matchWrap())
@@ -235,7 +243,7 @@ class KuliahVaultController(
             container.addView(space(14))
 
             if (pdfs.isEmpty()) {
-                container.addView(emptyGlassBox("Folder ini masih kosong. Tekan '+ Impor PDF' untuk menambahkan materi."))
+                container.addView(emptyGlassBox("Folder ini masih kosong. Tekan '+ Impor PDF' (bisa pilih banyak file sekaligus dari Google Drive)."))
             } else {
                 for (pdf in pdfs) {
                     val analysis = KuliahVaultEngine.parseAnalysisJson(pdf.analysisJson)
@@ -283,6 +291,189 @@ class KuliahVaultController(
                 }
             }
         }
+    }
+
+    /**
+     * Menangani impor banyak PDF sekaligus dari Google Drive / Penyimpanan HP.
+     */
+    fun handlePickedPdfUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        if (uris.size == 1) {
+            handlePickedPdfUri(uris.first())
+            return
+        }
+
+        val statusText = TextView(activity).apply {
+            text = "Menyiapkan ${uris.size} file PDF..."
+            textSize = 13f
+            setPadding(dp(20), dp(16), dp(20), dp(12))
+        }
+        val loadingDialog = AlertDialog.Builder(activity)
+            .setTitle("Impor Massal (${uris.size} PDF)")
+            .setView(statusText)
+            .setCancelable(false)
+            .show()
+
+        Thread {
+            val successes = mutableListOf<BatchPdfCandidate>()
+            val failedNames = mutableListOf<String>()
+
+            uris.forEachIndexed { idx, uri ->
+                val rawName = queryDisplayName(uri) ?: "Materi_${idx + 1}_${System.currentTimeMillis()}.pdf"
+                mainHandler.post {
+                    statusText.text = "Memproses (${idx + 1}/${uris.size}):\n$rawName\n\nMengekstrak tabel 2D, gambar, diagram & rumus..."
+                }
+                try {
+                    val file = KuliahVaultEngine.importFileToInternalStorage(
+                        activity, uri, "pdf", rawName.removeSuffix(".pdf"), "pdf"
+                    )
+                    val extraction = KuliahVaultEngine.extractPdfInfo(activity, file)
+                    if (!extraction.ok) {
+                        file.delete()
+                        failedNames.add("$rawName (${extraction.error})")
+                    } else {
+                        val cls = KuliahVaultEngine.classifyText(extraction.text)
+                        val analysis = extraction.prebuiltAnalysis ?: KuliahVaultEngine.analyzeText(extraction.text)
+                        successes.add(
+                            BatchPdfCandidate(
+                                defaultTitle = rawName.replace(Regex("\\.pdf$", RegexOption.IGNORE_CASE), ""),
+                                file = file,
+                                extraction = extraction,
+                                cls = cls,
+                                analysis = analysis
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    failedNames.add("$rawName (${e.message})")
+                }
+            }
+
+            mainHandler.post {
+                loadingDialog.dismiss()
+                if (successes.isEmpty()) {
+                    AlertDialog.Builder(activity)
+                        .setTitle("Semua PDF Gagal Dibaca")
+                        .setMessage(failedNames.joinToString("\n• ", prefix = "• "))
+                        .setPositiveButton("Tutup", null)
+                        .show()
+                } else {
+                    showBatchPdfConfirmationDialog(successes, failedNames)
+                }
+            }
+        }.start()
+    }
+
+    private fun showBatchPdfConfirmationDialog(
+        candidates: List<BatchPdfCandidate>,
+        failedNames: List<String>
+    ) {
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(12), dp(18), dp(8))
+        }
+
+        root.addView(TextView(activity).apply {
+            text = "Tujuan Folder Penyimpanan:"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#1E1B4B"))
+        })
+
+        val spinnerItems = mutableListOf("Otomatis per File (Deteksi AI)")
+        spinnerItems.addAll(KuliahVaultEngine.VAULT_COURSES.map { it.name })
+
+        // Jika user mengimpor dari dalam folder mata kuliah tertentu, otomatis pilih folder tersebut
+        val preselectedIdx = selectedPdfFolder?.let { activeKey ->
+            val idx = KuliahVaultEngine.VAULT_COURSES.indexOfFirst { it.key == activeKey }
+            if (idx >= 0) idx + 1 else 0
+        } ?: 0
+
+        val folderSpinner = Spinner(activity).apply {
+            adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, spinnerItems)
+            setSelection(preselectedIdx)
+        }
+        root.addView(folderSpinner)
+        root.addView(space(8))
+
+        val listScroll = ScrollView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(290))
+        }
+        val listBox = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+
+        candidates.forEachIndexed { idx, item ->
+            val visualCount = item.analysis.figures.size + item.analysis.diagrams.size
+            val rowCard = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#EEF2FF"))
+                    setStroke(dp(1), Color.parseColor("#C7D2FE"))
+                    cornerRadius = dp(10).toFloat()
+                }
+            }
+            rowCard.addView(TextView(activity).apply {
+                text = "${idx + 1}. ${item.defaultTitle}"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#0F172A"))
+            })
+            rowCard.addView(TextView(activity).apply {
+                text = "${item.extraction.pageCount} hal • ${item.analysis.tables.size} tabel • $visualCount visual • AI: ${item.cls.label}"
+                textSize = 11f
+                setTextColor(Color.parseColor("#4338CA"))
+            })
+            listBox.addView(rowCard, matchWrapBottom(6))
+        }
+
+        if (failedNames.isNotEmpty()) {
+            listBox.addView(TextView(activity).apply {
+                text = "Dilewati (${failedNames.size} gagal):\n" + failedNames.joinToString("\n") { "• $it" }
+                textSize = 11f
+                setTextColor(Color.parseColor("#DC2626"))
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+
+        listScroll.addView(listBox)
+        root.addView(listScroll)
+
+        AlertDialog.Builder(activity)
+            .setTitle("Siap Simpan ${candidates.size} PDF")
+            .setView(root)
+            .setPositiveButton("Simpan Semua (${candidates.size} PDF)") { _, _ ->
+                val selPos = folderSpinner.selectedItemPosition
+                var lastTargetKey = selectedPdfFolder ?: "umum"
+
+                for (item in candidates) {
+                    val targetCourseKey = if (selPos == 0) {
+                        item.cls.suggestedCourseKey
+                    } else {
+                        KuliahVaultEngine.VAULT_COURSES[selPos - 1].key
+                    }
+                    lastTargetKey = targetCourseKey
+                    db.insertVaultPdf(
+                        courseKey = targetCourseKey,
+                        title = item.defaultTitle,
+                        fileUri = item.file.absolutePath,
+                        pageCount = item.extraction.pageCount,
+                        bodyText = item.extraction.text,
+                        analysisJson = KuliahVaultEngine.analysisToJson(item.analysis),
+                        suggestedBase = item.cls.suggestedBase,
+                        confidence = item.cls.share
+                    )
+                }
+
+                if (selPos > 0) {
+                    selectedPdfFolder = lastTargetKey
+                }
+                Toast.makeText(activity, "Berhasil menyimpan ${candidates.size} PDF sekaligus!", Toast.LENGTH_LONG).show()
+                activeTabRenderer?.invoke()
+            }
+            .setNegativeButton("Batal") { _, _ ->
+                candidates.forEach { it.file.delete() }
+            }
+            .show()
     }
 
     fun handlePickedPdfUri(uri: Uri) {
@@ -358,7 +549,8 @@ class KuliahVaultController(
             setPadding(0, dp(8), 0, dp(10))
         }
         val courseNames = KuliahVaultEngine.VAULT_COURSES.map { it.name }
-        val defaultIdx = KuliahVaultEngine.VAULT_COURSES.indexOfFirst { it.key == cls.suggestedCourseKey }.coerceAtLeast(0)
+        val preferredKey = selectedPdfFolder ?: cls.suggestedCourseKey
+        val defaultIdx = KuliahVaultEngine.VAULT_COURSES.indexOfFirst { it.key == preferredKey }.coerceAtLeast(0)
         val spinner = Spinner(activity).apply {
             adapter = ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, courseNames)
             setSelection(defaultIdx)
@@ -464,7 +656,6 @@ class KuliahVaultController(
         val pdf = db.getVaultPdf(pdfId) ?: return
         val parsed = KuliahVaultEngine.parseAnalysisJson(pdf.analysisJson)
 
-        // Otomatis upgrade PDF lama yang belum diproses oleh mesin spasial v2
         if (parsed.schemaVersion < 2 && File(pdf.fileUri).exists()) {
             val loading = AlertDialog.Builder(activity)
                 .setTitle("Meningkatkan Tampilan PDF")
@@ -534,7 +725,7 @@ class KuliahVaultController(
 
         var activeSubTab = when {
             highlightQuery.isNotBlank() -> 4
-            analysis.tables.isNotEmpty() -> 4 // Langsung buka Materi Bab Terpadu (berisi teks + tabel + gambar inline)
+            analysis.tables.isNotEmpty() -> 4
             else -> 0
         }
         val visualTotal = analysis.figures.size + analysis.diagrams.size
@@ -762,7 +953,6 @@ class KuliahVaultController(
                             }
                             bodyBox.addView(secCard, matchWrapBottom(10))
 
-                            // Sisipkan tabel & gambar yang berasal dari halaman bab ini secara inline!
                             if (shownPages.add(sec.page)) {
                                 analysis.tables.filter { it.page == sec.page }.forEach { tbl ->
                                     bodyBox.addView(buildNativeTableCard(tbl), matchWrapBottom(10))
@@ -808,9 +998,6 @@ class KuliahVaultController(
             .show()
     }
 
-    /**
-     * Merender ExtractedTable menjadi komponen TableLayout 2D asli dengan header indigo & zebra rows.
-     */
     private fun buildNativeTableCard(tbl: ExtractedTable): LinearLayout {
         val wrapper = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -854,7 +1041,6 @@ class KuliahVaultController(
             setBackgroundColor(Color.parseColor("#CBD5E1"))
         }
 
-        // Baris Header
         val headRow = TableRow(activity)
         tbl.headers.forEach { hText ->
             val cell = TextView(activity).apply {
@@ -874,7 +1060,6 @@ class KuliahVaultController(
         }
         tableLayout.addView(headRow)
 
-        // Baris Isi (Zebra Stripes)
         tbl.rows.forEachIndexed { rIdx, rowCells ->
             val tr = TableRow(activity)
             val rowBg = if (rIdx % 2 == 0) Color.WHITE else Color.parseColor("#F1F5F9")
@@ -901,9 +1086,6 @@ class KuliahVaultController(
         return wrapper
     }
 
-    /**
-     * Merender gambar/grafik hasil potongan dari halaman PDF dengan fitur ketuk untuk zoom.
-     */
     private fun buildExtractedFigureCard(fig: ExtractedFigure): LinearLayout {
         val card = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -944,9 +1126,6 @@ class KuliahVaultController(
         return card
     }
 
-    /**
-     * Merender diagram vektor otomatis (Flowchart / Kurva BEP / EOQ / Normal) dari kode.
-     */
     private fun buildProceduralDiagramCard(diag: ProceduralDiagram): LinearLayout {
         val card = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
