@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/analog_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_glass_circle"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="10dp">
+
+    <AnalogClock
+        android:id="@+id/analog_clock_view"
+        android:layout_width="112dp"
+        android:layout_height="112dp"
+        android:dial="@drawable/widget_analog_dial"
+        android:hand_hour="@drawable/widget_analog_hand_hour"
+        android:hand_minute="@drawable/widget_analog_hand_minute"
+        android:hand_second="@drawable/widget_analog_hand_second"
+        tools:targetApi="31" />
+
+    <TextView
+        android:id="@+id/analog_next_badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/widget_glass_pill"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:paddingLeft="8dp"
+        android:paddingTop="2dp"
+        android:paddingRight="8dp"
+        android:paddingBottom="2dp"
+        android:text="07:00 • A405"
+        android:textColor="#2E8B57"
+        android:textSize="10sp"
+        android:textStyle="bold" />
+</LinearLayout>
