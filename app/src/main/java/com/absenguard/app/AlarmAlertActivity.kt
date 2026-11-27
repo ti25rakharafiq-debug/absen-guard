@@ -1,5 +1,7 @@
 package com.absenguard.app
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.Context
@@ -19,9 +21,6 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.text.InputType
-import android.animation.ObjectAnimator
-import android.animation.ValueAnimator
-import android.view.animation.OvershootInterpolator
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -92,13 +91,14 @@ class AlarmAlertActivity : AppCompatActivity() {
                 startMinute = 0,
                 endHour = 8,
                 endMinute = 40,
-                courseName = "Simulasi Tes Absen BOC",
+                courseName = "Simulasi Tes Absen E-Learning",
                 room = "Online",
                 classMode = "Online",
                 ringEnabled = true,
                 vibrateEnabled = true,
                 notifEnabled = true,
-                active = true
+                active = true,
+                courseUrl = "https://elearning.ubpkarawang.ac.id/login/index.php"
             )
         } else {
             db.getScheduleById(scheduleId) ?: CourseSchedule(
@@ -114,7 +114,8 @@ class AlarmAlertActivity : AppCompatActivity() {
                 ringEnabled = true,
                 vibrateEnabled = true,
                 notifEnabled = true,
-                active = true
+                active = true,
+                courseUrl = ""
             )
         }
 
@@ -296,12 +297,14 @@ class AlarmAlertActivity : AppCompatActivity() {
             card.addView(edit, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
-        val btnPortal = makeActionButton("Buka Portal Absen (SIPT2)", "#5B6AD0") {
+        val btnPortal = makeActionButton("Buka E-Learning Matkul", "#5B6AD0") {
             if (!validateMath()) return@makeActionButton
             stopActiveAlarm()
             cancelNotif(schedule.id)
             val portalIntent = Intent(this, SiptPortalActivity::class.java).apply {
                 putExtra(AlarmScheduler.EXTRA_SCHEDULE_ID, schedule.id)
+                putExtra(SiptPortalActivity.EXTRA_COURSE_URL, schedule.courseUrl)
+                putExtra(SiptPortalActivity.EXTRA_COURSE_NAME, schedule.courseName)
             }
             startActivity(portalIntent)
             finish()
