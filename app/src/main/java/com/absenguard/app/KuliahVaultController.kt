@@ -709,37 +709,6 @@ class KuliahVaultController(
             .show()
     }
 
-    private fun readerCard(
-        bgHex: String,
-        borderHex: String,
-        badgeTitle: String,
-        content: String,
-        accentHex: String = "#334155"
-    ): LinearLayout {
-        return LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor(bgHex))
-                setStroke(dp(1), Color.parseColor(borderHex))
-                cornerRadius = dp(14).toFloat()
-            }
-            addView(TextView(activity).apply {
-                text = badgeTitle
-                textSize = 11f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.parseColor(accentHex))
-            })
-            addView(TextView(activity).apply {
-                text = content
-                textSize = 13f
-                setTextColor(Color.parseColor("#0F172A"))
-                setTextIsSelectable(true)
-                setPadding(0, dp(4), 0, 0)
-            })
-        }
-    }
-
     private fun openExternalPdf(filePath: String) {
         try {
             val file = File(filePath)
@@ -1314,12 +1283,6 @@ class KuliahVaultController(
         activity.startActivity(Intent.createChooser(intent, "Bagikan Catatan Kuliah"))
     }
 
-    /**
-     * 3-Tab Pro Lecture Reader & Audio Player:
-     * 1. Ringkasan & Kisi-Kisi
-     * 2. Transkrip Terstruktur (Per Bagian Topik)
-     * 3. Edit & Koreksi Teks
-     */
     fun showRecordingPlayerDialog(recordingId: Long) {
         val rec = db.getVaultRecording(recordingId) ?: return
         val analysis = KuliahTranscriptEngine.analyzeLectureTranscript(rec.segments, rec.courseKey)
@@ -1347,7 +1310,6 @@ class KuliahVaultController(
             setBackgroundColor(Color.parseColor("#F8FAFC"))
         }
 
-        // Top Actions Row (Export PDF & Share WA)
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1373,7 +1335,6 @@ class KuliahVaultController(
         })
         root.addView(topBar)
 
-        // Audio Player Bar (if audio file exists)
         if (player != null) {
             val audioBox = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1454,7 +1415,6 @@ class KuliahVaultController(
             mainHandler.post(seekTicker)
         }
 
-        // 3-Tab Strip
         var activeSubTab = 0
         val tabLabels = listOf(
             "Ringkasan (${analysis.keyPoints.size + analysis.examCues.size})",
@@ -2135,7 +2095,6 @@ class KuliahVaultController(
                 cards.add("Intisari #${idx + 1} (${p.title})" to s)
             }
         }
-        // Tambahkan kisi-kisi dari rekaman dosen ke Flashcard
         for (r in db.listVaultRecordings(courseKey)) {
             val lec = KuliahTranscriptEngine.analyzeLectureTranscript(r.segments, courseKey)
             lec.examCues.forEach { cue ->
