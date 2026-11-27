@@ -97,8 +97,10 @@ class MainActivity : AppCompatActivity() {
     private val restorePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { restoreBackup(it) }
     }
-    private val pdfPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vaultController.handlePickedPdfUri(it) }
+    private val pdfPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            vaultController.handlePickedPdfUris(uris)
+        }
     }
     private val boardCameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         if (success) vaultController.handleCapturedBoardPhoto()
@@ -647,7 +649,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteLightText())
             background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#0F172A", "#99F8FAFC", 16f)
             setOnClickListener {
-                if (!Settings.canDrawOverlays(this@MainActivity)) {
+                if (!Settings.canDrawOverlays(this)) {
                     openOverlayPermissionSettings()
                 } else {
                     DynamicIslandService.show(
