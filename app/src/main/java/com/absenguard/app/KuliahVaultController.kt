@@ -1,4 +1,4 @@
-package com.absenguard.app
+1package com.absenguard.app
 
 import android.Manifest
 import android.app.AlertDialog
@@ -817,7 +817,7 @@ class KuliahVaultController(
             setPadding(dp(10), dp(10), dp(10), dp(10))
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setStroke(dp(1.5f).toInt(), Color.parseColor("#818CF8"))
+                setStroke(dp(2), Color.parseColor("#818CF8"))
                 cornerRadius = dp(14).toFloat()
             }
         }
