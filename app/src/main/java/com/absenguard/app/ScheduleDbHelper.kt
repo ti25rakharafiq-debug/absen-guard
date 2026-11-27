@@ -37,7 +37,78 @@ data class AttendanceLog(
     val timestamp: Long
 )
 
-class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 3) {
+data class VaultPdf(
+    val id: Long,
+    val courseKey: String,
+    val title: String,
+    val fileUri: String,
+    val pageCount: Int,
+    val bodyText: String,
+    val analysisJson: String,
+    val suggestedBase: String?,
+    val confidence: Double,
+    val createdAt: Long
+)
+
+data class RecordingPart(
+    val uri: String,
+    val offsetMs: Long,
+    val durationMs: Long
+)
+
+data class RecordingSegment(
+    val text: String,
+    val startMs: Long,
+    val endMs: Long
+)
+
+data class VaultRecording(
+    val id: Long,
+    val courseKey: String,
+    val title: String,
+    val parts: List<RecordingPart>,
+    val durationMs: Long,
+    val segments: List<RecordingSegment>,
+    val transcriptText: String,
+    val createdAt: Long
+)
+
+data class VaultBoard(
+    val id: Long,
+    val courseKey: String,
+    val imageUri: String,
+    val ocrText: String,
+    val enhanced: Boolean,
+    val createdAt: Long
+)
+
+data class VaultFormula(
+    val id: Long,
+    val courseKey: String,
+    val title: String,
+    val expression: String,
+    val notes: String,
+    val source: String,
+    val createdAt: Long
+)
+
+data class VaultCounts(
+    val pdf: Int = 0,
+    val recording: Int = 0,
+    val board: Int = 0,
+    val formula: Int = 0
+)
+
+data class VaultSearchHit(
+    val type: String,
+    val id: Long,
+    val courseKey: String,
+    val title: String,
+    val snippet: String,
+    val createdAt: Long
+)
+
+class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -73,6 +144,8 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 "key TEXT PRIMARY KEY, " +
                 "value TEXT NOT NULL)"
         )
+
+        createVaultTables(db)
 
         val initialCourses = listOf(
             CourseSchedule(0, Calendar.MONDAY, 7, 0, 8, 40, "Pemasaran Industri", "A405", "Offline", true, true, true, true, "https://elearning.ubpkarawang.ac.id/course/view.php?id=393"),
@@ -127,6 +200,56 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         }
     }
 
+    private fun createVaultTables(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS vault_pdfs (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "course_key TEXT NOT NULL, " +
+                "title TEXT NOT NULL, " +
+                "file_uri TEXT NOT NULL, " +
+                "page_count INTEGER NOT NULL DEFAULT 0, " +
+                "body_text TEXT NOT NULL DEFAULT '', " +
+                "analysis_json TEXT NOT NULL DEFAULT '{}', " +
+                "suggested_base TEXT, " +
+                "confidence REAL NOT NULL DEFAULT 0, " +
+                "created_at INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS vault_recordings (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "course_key TEXT NOT NULL, " +
+                "title TEXT NOT NULL, " +
+                "parts_json TEXT NOT NULL DEFAULT '[]', " +
+                "duration_ms INTEGER NOT NULL DEFAULT 0, " +
+                "transcript_json TEXT NOT NULL DEFAULT '[]', " +
+                "transcript_text TEXT NOT NULL DEFAULT '', " +
+                "created_at INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS vault_boards (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "course_key TEXT NOT NULL, " +
+                "image_uri TEXT NOT NULL, " +
+                "ocr_text TEXT NOT NULL DEFAULT '', " +
+                "enhanced INTEGER NOT NULL DEFAULT 0, " +
+                "created_at INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS vault_formulas (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "course_key TEXT NOT NULL, " +
+                "title TEXT NOT NULL, " +
+                "expression TEXT NOT NULL, " +
+                "notes TEXT NOT NULL DEFAULT '', " +
+                "source TEXT NOT NULL DEFAULT 'manual', " +
+                "created_at INTEGER NOT NULL)"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_vault_pdfs_course ON vault_pdfs(course_key)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_vault_rec_course ON vault_recordings(course_key)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_vault_boards_course ON vault_boards(course_key)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_vault_formulas_course ON vault_formulas(course_key)")
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             try {
@@ -160,7 +283,12 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
             }
             db.update("app_settings", passCv, "key = 'sipt_password' AND value = 'ubpk2024'", null)
         }
+        if (oldVersion < 4) {
+            createVaultTables(db)
+        }
     }
+
+    // ==================== ABSENGUARD SCHEDULES & ATTENDANCE ====================
 
     fun getAllSchedules(): List<CourseSchedule> {
         val list = mutableListOf<CourseSchedule>()
@@ -194,13 +322,11 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         return list
     }
 
-    fun getSchedulesForDay(dayOfWeek: Int): List<CourseSchedule> {
-        return getAllSchedules().filter { it.dayOfWeek == dayOfWeek }
-    }
+    fun getSchedulesForDay(dayOfWeek: Int): List<CourseSchedule> =
+        getAllSchedules().filter { it.dayOfWeek == dayOfWeek }
 
-    fun getScheduleById(id: Long): CourseSchedule? {
-        return getAllSchedules().firstOrNull { it.id == id }
-    }
+    fun getScheduleById(id: Long): CourseSchedule? =
+        getAllSchedules().firstOrNull { it.id == id }
 
     fun insertSchedule(schedule: CourseSchedule): Long {
         val cv = ContentValues().apply {
@@ -271,9 +397,7 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
                 existingStatus = it.getString(1)
             }
         }
-        if (status == "TERLEWAT" && existingStatus == "HADIR") {
-            return
-        }
+        if (status == "TERLEWAT" && existingStatus == "HADIR") return
         val cv = ContentValues().apply {
             put("schedule_id", scheduleId)
             put("course_name", courseName)
@@ -320,6 +444,499 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         setSetting("skip_${scheduleId}_${today}", if (skip) "1" else "0")
     }
+
+    fun isAttendedToday(scheduleId: Long): Boolean {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val cursor = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM attendance_logs WHERE schedule_id = ? AND date_str = ? AND status = 'HADIR'",
+            arrayOf(scheduleId.toString(), today)
+        )
+        cursor.use {
+            if (it.moveToFirst()) return it.getInt(0) > 0
+        }
+        return false
+    }
+
+    fun getAttendanceStats(scheduleId: Long): Pair<Int, Int> {
+        var hadir = 0
+        var total = 0
+        val cursor = readableDatabase.rawQuery(
+            "SELECT status FROM attendance_logs WHERE schedule_id = ?",
+            arrayOf(scheduleId.toString())
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                total++
+                if (it.getString(0) == "HADIR") hadir++
+            }
+        }
+        return Pair(hadir, total)
+    }
+
+    fun getSetting(key: String, defaultValue: String): String {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT value FROM app_settings WHERE key = ?",
+            arrayOf(key)
+        )
+        cursor.use {
+            if (it.moveToFirst()) return it.getString(0)
+        }
+        return defaultValue
+    }
+
+    fun setSetting(key: String, value: String) {
+        val cv = ContentValues().apply {
+            put("key", key)
+            put("value", value)
+        }
+        writableDatabase.insertWithOnConflict("app_settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    // ==================== KULIAHVAULT IE: PDF, REKAMAN, PAPAN TULIS, RUMUS ====================
+
+    fun insertVaultPdf(
+        courseKey: String,
+        title: String,
+        fileUri: String,
+        pageCount: Int,
+        bodyText: String,
+        analysisJson: String,
+        suggestedBase: String?,
+        confidence: Double
+    ): Long {
+        val cv = ContentValues().apply {
+            put("course_key", courseKey)
+            put("title", title)
+            put("file_uri", fileUri)
+            put("page_count", pageCount)
+            put("body_text", bodyText)
+            put("analysis_json", analysisJson)
+            put("suggested_base", suggestedBase)
+            put("confidence", confidence)
+            put("created_at", System.currentTimeMillis())
+        }
+        return writableDatabase.insert("vault_pdfs", null, cv)
+    }
+
+    fun listVaultPdfs(courseKey: String? = null): List<VaultPdf> {
+        val list = mutableListOf<VaultPdf>()
+        val cursor = if (courseKey.isNullOrBlank()) {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, file_uri, page_count, '', analysis_json, suggested_base, confidence, created_at FROM vault_pdfs ORDER BY created_at DESC",
+                null
+            )
+        } else {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, file_uri, page_count, '', analysis_json, suggested_base, confidence, created_at FROM vault_pdfs WHERE course_key = ? ORDER BY created_at DESC",
+                arrayOf(courseKey)
+            )
+        }
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    VaultPdf(
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = it.getString(2),
+                        fileUri = it.getString(3),
+                        pageCount = it.getInt(4),
+                        bodyText = it.getString(5) ?: "",
+                        analysisJson = it.getString(6) ?: "{}",
+                        suggestedBase = it.getString(7),
+                        confidence = it.getDouble(8),
+                        createdAt = it.getLong(9)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun getVaultPdf(id: Long): VaultPdf? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT id, course_key, title, file_uri, page_count, body_text, analysis_json, suggested_base, confidence, created_at FROM vault_pdfs WHERE id = ?",
+            arrayOf(id.toString())
+        )
+        cursor.use {
+            if (it.moveToFirst()) {
+                return VaultPdf(
+                    id = it.getLong(0),
+                    courseKey = it.getString(1),
+                    title = it.getString(2),
+                    fileUri = it.getString(3),
+                    pageCount = it.getInt(4),
+                    bodyText = it.getString(5) ?: "",
+                    analysisJson = it.getString(6) ?: "{}",
+                    suggestedBase = it.getString(7),
+                    confidence = it.getDouble(8),
+                    createdAt = it.getLong(9)
+                )
+            }
+        }
+        return null
+    }
+
+    fun moveVaultPdf(id: Long, newCourseKey: String) {
+        val cv = ContentValues().apply { put("course_key", newCourseKey) }
+        writableDatabase.update("vault_pdfs", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun renameVaultPdf(id: Long, newTitle: String) {
+        val cv = ContentValues().apply { put("title", newTitle) }
+        writableDatabase.update("vault_pdfs", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun deleteVaultPdf(id: Long) {
+        writableDatabase.delete("vault_pdfs", "id = ?", arrayOf(id.toString()))
+    }
+
+    fun insertVaultRecording(
+        courseKey: String,
+        title: String,
+        parts: List<RecordingPart>,
+        durationMs: Long,
+        segments: List<RecordingSegment>
+    ): Long {
+        val partsArr = JSONArray().apply {
+            parts.forEach { p ->
+                put(JSONObject().apply {
+                    put("uri", p.uri)
+                    put("offsetMs", p.offsetMs)
+                    put("durationMs", p.durationMs)
+                })
+            }
+        }
+        val segArr = JSONArray().apply {
+            segments.forEach { s ->
+                put(JSONObject().apply {
+                    put("text", s.text)
+                    put("startMs", s.startMs)
+                    put("endMs", s.endMs)
+                })
+            }
+        }
+        val fullText = segments.joinToString(" ") { it.text }
+        val cv = ContentValues().apply {
+            put("course_key", courseKey)
+            put("title", title)
+            put("parts_json", partsArr.toString())
+            put("duration_ms", durationMs)
+            put("transcript_json", segArr.toString())
+            put("transcript_text", fullText)
+            put("created_at", System.currentTimeMillis())
+        }
+        return writableDatabase.insert("vault_recordings", null, cv)
+    }
+
+    fun listVaultRecordings(courseKey: String? = null): List<VaultRecording> {
+        val list = mutableListOf<VaultRecording>()
+        val cursor = if (courseKey.isNullOrBlank()) {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, parts_json, duration_ms, transcript_json, transcript_text, created_at FROM vault_recordings ORDER BY created_at DESC",
+                null
+            )
+        } else {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, parts_json, duration_ms, transcript_json, transcript_text, created_at FROM vault_recordings WHERE course_key = ? ORDER BY created_at DESC",
+                arrayOf(courseKey)
+            )
+        }
+        cursor.use {
+            while (it.moveToNext()) {
+                val parts = parseParts(it.getString(3))
+                val segs = parseSegments(it.getString(5))
+                list.add(
+                    VaultRecording(
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = it.getString(2),
+                        parts = parts,
+                        durationMs = it.getLong(4),
+                        segments = segs,
+                        transcriptText = it.getString(6) ?: "",
+                        createdAt = it.getLong(7)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun getVaultRecording(id: Long): VaultRecording? =
+        listVaultRecordings().firstOrNull { it.id == id }
+
+    fun renameVaultRecording(id: Long, newTitle: String) {
+        val cv = ContentValues().apply { put("title", newTitle) }
+        writableDatabase.update("vault_recordings", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun moveVaultRecording(id: Long, newCourseKey: String) {
+        val cv = ContentValues().apply { put("course_key", newCourseKey) }
+        writableDatabase.update("vault_recordings", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun deleteVaultRecording(id: Long) {
+        writableDatabase.delete("vault_recordings", "id = ?", arrayOf(id.toString()))
+    }
+
+    private fun parseParts(raw: String?): List<RecordingPart> {
+        val out = mutableListOf<RecordingPart>()
+        try {
+            val arr = JSONArray(raw ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(RecordingPart(o.optString("uri"), o.optLong("offsetMs"), o.optLong("durationMs")))
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun parseSegments(raw: String?): List<RecordingSegment> {
+        val out = mutableListOf<RecordingSegment>()
+        try {
+            val arr = JSONArray(raw ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(RecordingSegment(o.optString("text"), o.optLong("startMs"), o.optLong("endMs")))
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    fun insertVaultBoard(courseKey: String, imageUri: String, ocrText: String, enhanced: Boolean): Long {
+        val cv = ContentValues().apply {
+            put("course_key", courseKey)
+            put("image_uri", imageUri)
+            put("ocr_text", ocrText)
+            put("enhanced", if (enhanced) 1 else 0)
+            put("created_at", System.currentTimeMillis())
+        }
+        return writableDatabase.insert("vault_boards", null, cv)
+    }
+
+    fun listVaultBoards(courseKey: String? = null): List<VaultBoard> {
+        val list = mutableListOf<VaultBoard>()
+        val cursor = if (courseKey.isNullOrBlank()) {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, image_uri, ocr_text, enhanced, created_at FROM vault_boards ORDER BY created_at DESC",
+                null
+            )
+        } else {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, image_uri, ocr_text, enhanced, created_at FROM vault_boards WHERE course_key = ? ORDER BY created_at DESC",
+                arrayOf(courseKey)
+            )
+        }
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    VaultBoard(
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        imageUri = it.getString(2),
+                        ocrText = it.getString(3) ?: "",
+                        enhanced = it.getInt(4) == 1,
+                        createdAt = it.getLong(5)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun getVaultBoard(id: Long): VaultBoard? =
+        listVaultBoards().firstOrNull { it.id == id }
+
+    fun updateVaultBoardText(id: Long, newText: String) {
+        val cv = ContentValues().apply { put("ocr_text", newText) }
+        writableDatabase.update("vault_boards", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun moveVaultBoard(id: Long, newCourseKey: String) {
+        val cv = ContentValues().apply { put("course_key", newCourseKey) }
+        writableDatabase.update("vault_boards", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun deleteVaultBoard(id: Long) {
+        writableDatabase.delete("vault_boards", "id = ?", arrayOf(id.toString()))
+    }
+
+    fun insertVaultFormula(
+        courseKey: String,
+        title: String,
+        expression: String,
+        notes: String = "",
+        source: String = "manual"
+    ): Long {
+        val cv = ContentValues().apply {
+            put("course_key", courseKey)
+            put("title", title)
+            put("expression", expression)
+            put("notes", notes)
+            put("source", source)
+            put("created_at", System.currentTimeMillis())
+        }
+        return writableDatabase.insert("vault_formulas", null, cv)
+    }
+
+    fun updateVaultFormula(id: Long, courseKey: String, title: String, expression: String, notes: String) {
+        val cv = ContentValues().apply {
+            put("course_key", courseKey)
+            put("title", title)
+            put("expression", expression)
+            put("notes", notes)
+        }
+        writableDatabase.update("vault_formulas", cv, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun deleteVaultFormula(id: Long) {
+        writableDatabase.delete("vault_formulas", "id = ?", arrayOf(id.toString()))
+    }
+
+    fun listVaultFormulas(courseKey: String? = null): List<VaultFormula> {
+        val list = mutableListOf<VaultFormula>()
+        val cursor = if (courseKey.isNullOrBlank()) {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, expression, notes, source, created_at FROM vault_formulas ORDER BY created_at DESC",
+                null
+            )
+        } else {
+            readableDatabase.rawQuery(
+                "SELECT id, course_key, title, expression, notes, source, created_at FROM vault_formulas WHERE course_key = ? ORDER BY created_at DESC",
+                arrayOf(courseKey)
+            )
+        }
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    VaultFormula(
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = it.getString(2),
+                        expression = it.getString(3),
+                        notes = it.getString(4) ?: "",
+                        source = it.getString(5) ?: "manual",
+                        createdAt = it.getLong(6)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun getVaultCourseCounts(): Map<String, VaultCounts> {
+        val map = mutableMapOf<String, VaultCounts>()
+        fun queryCount(table: String, updater: (VaultCounts, Int) -> VaultCounts) {
+            val c = readableDatabase.rawQuery("SELECT course_key, COUNT(*) FROM $table GROUP BY course_key", null)
+            c.use {
+                while (it.moveToNext()) {
+                    val key = it.getString(0)
+                    val n = it.getInt(1)
+                    val cur = map[key] ?: VaultCounts()
+                    map[key] = updater(cur, n)
+                }
+            }
+        }
+        queryCount("vault_pdfs") { cur, n -> cur.copy(pdf = n) }
+        queryCount("vault_recordings") { cur, n -> cur.copy(recording = n) }
+        queryCount("vault_boards") { cur, n -> cur.copy(board = n) }
+        queryCount("vault_formulas") { cur, n -> cur.copy(formula = n) }
+        return map
+    }
+
+    fun searchVaultAll(query: String): List<VaultSearchHit> {
+        val q = query.trim().lowercase()
+        if (q.length < 2) return emptyList()
+        val likeArg = "%$q%"
+        val hits = mutableListOf<VaultSearchHit>()
+
+        readableDatabase.rawQuery(
+            "SELECT id, course_key, title, body_text, created_at FROM vault_pdfs WHERE LOWER(title) LIKE ? OR LOWER(body_text) LIKE ? ORDER BY created_at DESC LIMIT 20",
+            arrayOf(likeArg, likeArg)
+        ).use {
+            while (it.moveToNext()) {
+                hits.add(
+                    VaultSearchHit(
+                        type = "pdf",
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = it.getString(2),
+                        snippet = KuliahVaultEngine.makeSnippet(it.getString(3) ?: it.getString(2), q),
+                        createdAt = it.getLong(4)
+                    )
+                )
+            }
+        }
+
+        readableDatabase.rawQuery(
+            "SELECT id, course_key, title, transcript_text, created_at FROM vault_recordings WHERE LOWER(title) LIKE ? OR LOWER(transcript_text) LIKE ? ORDER BY created_at DESC LIMIT 20",
+            arrayOf(likeArg, likeArg)
+        ).use {
+            while (it.moveToNext()) {
+                hits.add(
+                    VaultSearchHit(
+                        type = "recording",
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = it.getString(2),
+                        snippet = KuliahVaultEngine.makeSnippet(it.getString(3) ?: it.getString(2), q),
+                        createdAt = it.getLong(4)
+                    )
+                )
+            }
+        }
+
+        readableDatabase.rawQuery(
+            "SELECT id, course_key, ocr_text, created_at FROM vault_boards WHERE LOWER(ocr_text) LIKE ? ORDER BY created_at DESC LIMIT 20",
+            arrayOf(likeArg)
+        ).use {
+            while (it.moveToNext()) {
+                hits.add(
+                    VaultSearchHit(
+                        type = "board",
+                        id = it.getLong(0),
+                        courseKey = it.getString(1),
+                        title = "Papan Tulis",
+                        snippet = KuliahVaultEngine.makeSnippet(it.getString(2) ?: "", q),
+                        createdAt = it.getLong(3)
+                    )
+                )
+            }
+        }
+
+        return hits
+    }
+
+    fun listVaultMeetingDates(courseKey: String): List<String> {
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val keys = linkedSetOf<String>()
+        listOf("vault_pdfs", "vault_recordings", "vault_boards").forEach { table ->
+            readableDatabase.rawQuery(
+                "SELECT created_at FROM $table WHERE course_key = ? ORDER BY created_at DESC",
+                arrayOf(courseKey)
+            ).use {
+                while (it.moveToNext()) {
+                    keys.add(fmt.format(Date(it.getLong(0))))
+                }
+            }
+        }
+        return keys.toList().sortedDescending()
+    }
+
+    fun getVaultMeetingMaterial(
+        courseKey: String,
+        dateKey: String
+    ): Triple<List<VaultPdf>, List<VaultRecording>, List<VaultBoard>> {
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val pdfs = listVaultPdfs(courseKey).filter { fmt.format(Date(it.createdAt)) == dateKey }
+        val recs = listVaultRecordings(courseKey).filter { fmt.format(Date(it.createdAt)) == dateKey }
+        val boards = listVaultBoards(courseKey).filter { fmt.format(Date(it.createdAt)) == dateKey }
+        return Triple(pdfs, recs, boards)
+    }
+
+    // ==================== BACKUP & RESTORE ====================
 
     fun exportBackupJson(): String {
         val root = JSONObject()
@@ -423,58 +1040,5 @@ class ScheduleDbHelper(context: Context) : SQLiteOpenHelper(context, "absenguard
         } catch (_: Exception) {
             false
         }
-    }
-
-    fun isAttendedToday(scheduleId: Long): Boolean {
-        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-        val cursor = readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM attendance_logs WHERE schedule_id = ? AND date_str = ? AND status = 'HADIR'",
-            arrayOf(scheduleId.toString(), today)
-        )
-        cursor.use {
-            if (it.moveToFirst()) {
-                return it.getInt(0) > 0
-            }
-        }
-        return false
-    }
-
-    fun getAttendanceStats(scheduleId: Long): Pair<Int, Int> {
-        var hadir = 0
-        var total = 0
-        val cursor = readableDatabase.rawQuery(
-            "SELECT status FROM attendance_logs WHERE schedule_id = ?",
-            arrayOf(scheduleId.toString())
-        )
-        cursor.use {
-            while (it.moveToNext()) {
-                total++
-                if (it.getString(0) == "HADIR") {
-                    hadir++
-                }
-            }
-        }
-        return Pair(hadir, total)
-    }
-
-    fun getSetting(key: String, defaultValue: String): String {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT value FROM app_settings WHERE key = ?",
-            arrayOf(key)
-        )
-        cursor.use {
-            if (it.moveToFirst()) {
-                return it.getString(0)
-            }
-        }
-        return defaultValue
-    }
-
-    fun setSetting(key: String, value: String) {
-        val cv = ContentValues().apply {
-            put("key", key)
-            put("value", value)
-        }
-        writableDatabase.insertWithOnConflict("app_settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 }
