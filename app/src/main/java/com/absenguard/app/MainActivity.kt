@@ -649,7 +649,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(paletteLightText())
             background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#0F172A", "#99F8FAFC", 16f)
             setOnClickListener {
-                if (!Settings.canDrawOverlays(this)) {
+                if (!Settings.canDrawOverlays(this@MainActivity)) {
                     openOverlayPermissionSettings()
                 } else {
                     DynamicIslandService.show(
@@ -1856,3 +1856,497 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()
 }
+package com.absenguard.app
+
+import android.animation.ValueAnimator
+import android.Manifest
+import android.app.AlarmManager
+import android.app.AlertDialog
+import android.app.NotificationManager
+import android.app.TimePickerDialog
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.pdf.PdfDocument
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var db: ScheduleDbHelper
+    private lateinit var vaultController: KuliahVaultController
+    private lateinit var auroraView: AuroraMeshView
+    private lateinit var rootContainer: FrameLayout
+    private lateinit var mainContent: LinearLayout
+    private lateinit var vaultContentContainer: LinearLayout
+    private lateinit var fabAddSchedule: Button
+    private lateinit var permissionCard: LinearLayout
+    private lateinit var nextClassCard: FrameLayout
+    private lateinit var nextClassTitle: TextView
+    private lateinit var nextClassMeta: TextView
+    private lateinit var nextClassCountdown: TextView
+    private lateinit var nextClassOpenBtn: TextView
+    private lateinit var filterScroll: HorizontalScrollView
+    private lateinit var filterPillIndicator: View
+    private lateinit var filterRow: LinearLayout
+    private lateinit var scheduleListContainer: LinearLayout
+    private val dayChips = mutableMapOf<Int, TextView>()
+    private val bottomNavButtons = mutableMapOf<Int, TextView>()
+    private var activeMainTab = 0 // 0=Jadwal, 1=PDF, 2=Rekam, 3=Papan, 4=Belajar
+    private var selectedDayFilter = 0
+    private var currentNextSchedule: CourseSchedule? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    private val ringtonePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            try {
+                contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: Exception) {
+            }
+            db.setSetting("custom_ringtone_uri", it.toString())
+            Toast.makeText(this, "Nada dering tersimpan", Toast.LENGTH_SHORT).show()
+        }
+    }
+    private val backupPicker = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let { writeBackup(it) }
+    }
+    private val restorePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { restoreBackup(it) }
+    }
+    private val pdfPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            vaultController.handlePickedPdfUris(uris)
+        }
+    }
+    private val boardCameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        if (success) vaultController.handleCapturedBoardPhoto()
+    }
+    private val boardGalleryLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let { vaultController.handlePickedBoardImage(it) }
+    }
+    private val audioPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            Toast.makeText(this, "Izin mikrofon aktif, tekan tombol rekam lagi", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Izin mikrofon diperlukan untuk merekam dosen", Toast.LENGTH_LONG).show()
+        }
+    }
+    private val cameraPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            Toast.makeText(this, "Izin kamera aktif, tekan tombol Kamera lagi", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Izin kamera diperlukan untuk memotret papan tulis", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val countdownRunnable = object : Runnable {
+        override fun run() {
+            updateNextClassBanner()
+            handler.postDelayed(this, 1000L)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        db = ScheduleDbHelper(this)
+        vaultController = KuliahVaultController(
+            activity = this,
+            db = db,
+            isDarkProvider = { isDarkMode() },
+            onRequestPickPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
+            onRequestCapturePhoto = { uri -> boardCameraLauncher.launch(uri) },
+            onRequestPickGallery = { boardGalleryLauncher.launch("image/*") },
+            onRequestAudioPermission = { audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            onRequestCameraPermission = { cameraPermLauncher.launch(Manifest.permission.CAMERA) }
+        )
+        vaultController.syncDefaultCourseFromSchedule()
+        applySystemBars()
+
+        rootContainer = FrameLayout(this)
+        auroraView = AuroraMeshView(this) { isDarkMode() }
+        rootContainer.addView(
+            auroraView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_ALWAYS
+        }
+        val pageWrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(136))
+        }
+
+        mainContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        vaultContentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        buildHeader()
+        buildPermissionCard()
+        buildNextClassCard()
+        buildControlCard()
+        buildFilterChips()
+        scheduleListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        mainContent.addView(scheduleListContainer)
+
+        pageWrapper.addView(mainContent)
+        pageWrapper.addView(vaultContentContainer)
+        scrollView.addView(pageWrapper)
+        rootContainer.addView(scrollView)
+
+        fabAddSchedule = Button(this).apply {
+            text = "+ Tambah Jadwal"
+            isAllCaps = false
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            setPadding(dp(20), dp(11), dp(20), dp(11))
+            background = LiquidGlassKit.pillGlassSurface(
+                this@MainActivity,
+                "#E64338CA",
+                "#A6F8FAFC",
+                26f
+            )
+            LiquidGlassKit.applyGlassElevation(this, 10f, isDarkMode())
+            setOnClickListener { showScheduleEditorDialog(null) }
+            LiquidGlassKit.attachLiquidTouch(this, 0.94f)
+        }
+        val fabParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            setMargins(dp(16), dp(16), dp(16), dp(78))
+        }
+        rootContainer.addView(fabAddSchedule, fabParams)
+
+        buildBottomGlassDock()
+
+        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
+            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(sys.left, sys.top, sys.right, sys.bottom)
+            insets
+        }
+        setContentView(rootContainer)
+        refreshAll()
+        startBreathing(nextClassCard)
+        handler.post(countdownRunnable)
+    }
+
+    private fun buildBottomGlassDock() {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 28f, strongRim = true)
+            LiquidGlassKit.applyGlassElevation(this, 12f, isDarkMode())
+        }
+        val tabs = listOf(
+            0 to "Jadwal",
+            1 to "PDF",
+            2 to "Rekam",
+            3 to "Papan",
+            4 to "Belajar"
+        )
+        bottomNavButtons.clear()
+        for ((idx, label) in tabs) {
+            val btn = TextView(this).apply {
+                text = label
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setOnClickListener { switchMainTab(idx) }
+                LiquidGlassKit.attachLiquidTouch(this, 0.94f)
+            }
+            bottomNavButtons[idx] = btn
+            dock.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            })
+        }
+        val dockParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(14), dp(8), dp(14), dp(14))
+        }
+        rootContainer.addView(dock, dockParams)
+        updateBottomDockStyles()
+    }
+
+    private fun switchMainTab(tabIndex: Int) {
+        activeMainTab = tabIndex
+        updateBottomDockStyles()
+        if (tabIndex == 0) {
+            mainContent.visibility = View.VISIBLE
+            vaultContentContainer.visibility = View.GONE
+            fabAddSchedule.visibility = View.VISIBLE
+            refreshAll()
+        } else {
+            mainContent.visibility = View.GONE
+            vaultContentContainer.visibility = View.VISIBLE
+            fabAddSchedule.visibility = View.GONE
+            vaultController.syncDefaultCourseFromSchedule()
+            when (tabIndex) {
+                1 -> vaultController.renderPdfTab(vaultContentContainer)
+                2 -> vaultController.renderRecordTab(vaultContentContainer)
+                3 -> vaultController.renderBoardTab(vaultContentContainer)
+                4 -> vaultController.renderStudyTab(vaultContentContainer)
+            }
+        }
+    }
+
+    private fun updateBottomDockStyles() {
+        for ((idx, btn) in bottomNavButtons) {
+            val active = idx == activeMainTab
+            btn.setTextColor(if (active) paletteLightText() else paletteText())
+            btn.background = if (active) {
+                LiquidGlassKit.pillGlassSurface(this, "#4F46E5", "#CCF8FAFC", 22f)
+            } else {
+                null
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        auroraView.startMotion()
+        if (activeMainTab == 0) refreshAll()
+    }
+
+    override fun onPause() {
+        auroraView.stopMotion()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(countdownRunnable)
+        super.onDestroy()
+    }
+
+    private fun refreshAll() {
+        updatePermissionVisibility()
+        updateNextClassBanner()
+        updateFilterPillSelection(animate = false)
+        renderScheduleCards()
+        AlarmScheduler.scheduleAll(this)
+        NextClassWidgetProvider.updateAllWidgets(this)
+    }
+
+    private fun buildHeader() {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        titleCol.addView(TextView(this).apply {
+            text = "AbsenGuard"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+        })
+        titleCol.addView(TextView(this).apply {
+            text = "E-Learning & SIPT UBP • KuliahVault IE"
+            textSize = 12f
+            setTextColor(paletteSubtext())
+        })
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        buttons.addView(headerButton(if (isDarkMode()) "Cerah" else "Gelap") {
+            db.setSetting("dark_mode", if (isDarkMode()) "0" else "1")
+            recreate()
+        })
+        buttons.addView(headerButton("Riwayat") { showHistoryDialog() })
+        buttons.addView(headerButton("Setelan") { showSettingsDialog() })
+        row.addView(titleCol)
+        row.addView(buttons)
+        mainContent.addView(row)
+        mainContent.addView(space(14))
+    }
+
+    private fun headerButton(label: String, action: () -> Unit): Button {
+        return Button(this).apply {
+            text = label
+            isAllCaps = false
+            textSize = 11f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteText())
+            setPadding(dp(11), dp(7), dp(11), dp(7))
+            background = LiquidGlassKit.glassSurface(this@MainActivity, isDarkMode(), 18f)
+            LiquidGlassKit.applyGlassElevation(this, 3f, isDarkMode())
+            setOnClickListener { action() }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }.also {
+            it.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(36)
+            ).apply { marginStart = dp(6) }
+        }
+    }
+
+    private fun buildPermissionCard() {
+        permissionCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = LiquidGlassKit.glassSurface(
+                this@MainActivity,
+                isDarkMode(),
+                22f,
+                if (isDarkMode()) "#4D991B1B" else "#D9FEE2E2"
+            )
+            LiquidGlassKit.applyGlassElevation(this, 4f, isDarkMode())
+        }
+        permissionCard.addView(TextView(this).apply {
+            text = "Izin Alarm, Notifikasi & Dynamic Island Belum Lengkap"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor(if (isDarkMode()) "#FCA5A5" else "#DC2626"))
+        })
+        permissionCard.addView(space(4))
+        permissionCard.addView(TextView(this).apply {
+            text = "Aktifkan izin notifikasi, alarm presisi, bebas hemat baterai, dan tampil di atas aplikasi lain."
+            textSize = 12f
+            setTextColor(paletteText())
+        })
+        permissionCard.addView(space(10))
+        val button = Button(this).apply {
+            text = "Izinkan Sekarang"
+            isAllCaps = false
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(paletteLightText())
+            background = LiquidGlassKit.pillGlassSurface(this@MainActivity, "#DC2626", "#99F8FAFC", 18f)
+            setOnClickListener { requestMissingPermissions() }
+            LiquidGlassKit.attachLiquidTouch(this)
+        }
+        permissionCard.addView(button)
+        mainContent.addView(permissionCard)
+        mainContent.addView(space(12))
+    }
+
+    private fun updatePermissionVisibility() {
+        permissionCard.visibility = if (hasMissingSystemPermissions()) View.VISIBLE else View.GONE
+    }
+
+    private fun hasMissingSystemPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!am.canScheduleExactAlarms()) return true
+        }
+        if (db.getSetting("dynamic_island_enabled", "1") == "1" && !Settings.canDrawOverlays(this)) {
+            return true
+        }
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return !pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestMissingPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!am.canScheduleExactAlarms()) {
+                try {
+                    startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+                return
+            }
+        }
+        if (db.getSetting("dynamic_island_enabled", "1") == "1" && !Settings.canDrawOverlays(this)) {
+            openOverlayPermissionSettings()
+            return
+        }
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }
+        }
+    }
+
+    private fun openOverlayPermissionSettings() {
+        Toast.makeText(this, "Aktifkan 'Tampilkan di atas aplikasi lain' untuk Dynamic Island", Toast.LENGTH_LONG).show()
+        try {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        }
+    }
+
+    private fun buildNextClassCard() {
+        nextClassCard = FrameLayout(this).apply {
+            background = LiquidGlassKit.heroGlassSurface(this@MainActivity, 26f)
+            LiquidGlassKit.applyGlassElevation(this, 10f, isDarkMode())
+            LiquidGlassKit.attachLiquidTouch(this, 0.98f)
+        }
+
+        val shimmer = GlassShimmerOverlay(this)
+        nextClassCard.addView(
+            shimmer,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MA
